@@ -1,0 +1,73 @@
+name: Nightly Release
+
+on:
+  schedule:
+    - cron: '0 2 * * *' # Run at 2 AM UTC daily
+  workflow_dispatch:
+
+jobs:
+  nightly-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+        token: ${{ secrets.GH_PAT || github.token }}
+        fetch-depth: 0
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+    - name: Run tests
+      run: |
+        python test_watermarker.py
+
+    - name: Check for changes and Create Release
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        # Get the latest tag, suppress error if no tags exist
+        LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+        
+        HAS_CHANGES="false"
+        if [ -z "$LATEST_TAG" ]; then
+          echo "No tags found. Proceeding with initial nightly release."
+          HAS_CHANGES="true"
+        else
+          # Check if there are commits between latest tag and HEAD
+          # We use `git log` range. If output is empty, no changes.
+          COMMITS=$(git log --oneline "${LATEST_TAG}..HEAD")
+          if [ -z "$COMMITS" ]; then
+            echo "No new commits since $LATEST_TAG. Skipping release."
+          else
+            echo "Found changes since $LATEST_TAG:"
+            echo "$COMMITS"
+            HAS_CHANGES="true"
+          fi
+        fi
+
+        if [ "$HAS_CHANGES" == "true" ]; then
+          # Use a unique tag based on date and time to allow multiple runs if needed (e.g. manual dispatch)
+          # Or just Date. If running daily, Date is fine.
+          TAG_NAME="nightly-$(date +'%Y-%m-%d')"
+          
+          # Check if tag exists (e.g. re-run on same day)
+          if git rev-parse "$TAG_NAME" >/dev/null 2>&1; then
+             # Append timestamp if tag exists
+             TAG_NAME="nightly-$(date +'%Y-%m-%d-%H%M')"
+          fi
+          
+          echo "Creating release $TAG_NAME"
+          
+          gh release create "$TAG_NAME" --title "Nightly Release $TAG_NAME" --generate-notes --prerelease
+        fi
