@@ -65,26 +65,45 @@ class TestWatermarker(unittest.TestCase):
         self.assertEqual(loaded["size"], 0.5)
 
     def test_apply_watermark_default(self):
-        # Create base image
+        # Create base image (large enough for various watermark sizes)
         base_path = os.path.join(watermarker.TEMP_DIR, "base.png")
-        base_img = Image.new('RGB', (800, 600), color='white')
+        base_img = Image.new('RGB', (1000, 1000), color='white')
         base_img.save(base_path)
 
-        # Create watermark image
-        watermark_path = os.path.join(watermarker.WATERMARKS_DIR, "123.png")
+        # Create watermark image (e.g., 200x200 solid blue)
+        watermark_path = os.path.join(watermarker.WATERMARKS_DIR, "test_watermark.png")
         watermark_img = Image.new('RGBA', (200, 200), color='blue')
         watermark_img.save(watermark_path)
 
         output_path = os.path.join(watermarker.TEMP_DIR, "output.png")
-        settings = {"position": "bottom right", "size": 0.25}
         
-        # Use unpacked arguments
-        result = watermarker.apply_watermark(base_path, watermark_path, output_path, position=settings["position"], size=settings["size"])
+        # Apply watermark with size 0.5 (should make watermark 100x100)
+        result = watermarker.apply_watermark(base_path, watermark_path, output_path, position="top left", size=0.5)
         self.assertTrue(result)
         self.assertTrue(os.path.exists(output_path))
         
-        out_img = Image.open(output_path)
-        self.assertEqual(out_img.size, (800, 600))
+        out_img = Image.open(output_path).convert("RGBA")
+        
+        # Verify the watermark is present and scaled correctly.
+        # Original watermark 200x200. Size 0.5 means it should be 100x100.
+        # Positioned at top-left, with 2% padding (1000 * 0.02 = 20 pixels).
+        # So, watermark should be from (20,20) to (120,120).
+        # Check a pixel within the expected watermark area (e.g., 50,50)
+        # and a pixel outside (e.g., 10,10, which should be white).
+        
+        # Pixel inside watermark area, should be blue
+        pixel_in_watermark = out_img.getpixel((50, 50))
+        self.assertEqual(pixel_in_watermark, (0, 0, 255, 255))
+        
+        # Pixel outside watermark area (padding), should be white
+        pixel_outside_watermark = out_img.getpixel((10, 10))
+        self.assertEqual(pixel_outside_watermark, (255, 255, 255, 255))
+
+        # Pixel just outside the 100x100 watermark, to ensure it's not larger
+        pixel_right_of_watermark = out_img.getpixel((125, 50))
+        self.assertEqual(pixel_right_of_watermark, (255, 255, 255, 255))
+        pixel_below_watermark = out_img.getpixel((50, 125))
+        self.assertEqual(pixel_below_watermark, (255, 255, 255, 255))
 
     def test_apply_watermark_repeated(self):
         base_path = os.path.join(watermarker.TEMP_DIR, "base_tiled.png")
@@ -99,6 +118,31 @@ class TestWatermarker(unittest.TestCase):
         
         result = watermarker.apply_watermark(base_path, watermark_path, output_path, position="repeated", size=0.1)
         self.assertTrue(result)
+
+    def test_apply_watermark_strength(self):
+        # Base: White
+        base_path = os.path.join(watermarker.TEMP_DIR, "base_strength.png")
+        base_img = Image.new('RGBA', (100, 100), color=(255, 255, 255, 255))
+        base_img.save(base_path)
+
+        # Watermark: Black
+        watermark_path = os.path.join(watermarker.WATERMARKS_DIR, "black.png")
+        watermark_img = Image.new('RGBA', (50, 50), color=(0, 0, 0, 255))
+        watermark_img.save(watermark_path)
+
+        output_path = os.path.join(watermarker.TEMP_DIR, "output_strength.png")
+        
+        # Apply with 50% strength at "center"
+        result = watermarker.apply_watermark(base_path, watermark_path, output_path, position="center", size=0.5, strength=0.5)
+        self.assertTrue(result)
+        
+        # Check pixel color at center
+        out_img = Image.open(output_path).convert("RGBA")
+        center_pixel = out_img.getpixel((50, 50))
+        
+        # Should be grey (around 127) not black (0) and not white (255)
+        # 255 * 0.5 = ~127
+        self.assertTrue(100 < center_pixel[0] < 160, f"Pixel value {center_pixel} is not blending correctly")
 
     @patch('watermarker.tele.send_telegram')
     def test_process_text_commands(self, mock_send):

@@ -3,7 +3,7 @@ import sys
 import os
 from PIL import Image, ImageChops
 
-def apply_watermark(base_image_path, watermark_path, output_path, position="bottom right", size=0.25, max_pixels=None, mode="standard", angle=0):
+def apply_watermark(base_image_path, watermark_path, output_path, position="bottom right", size=0.25, max_pixels=None, mode="standard", angle=0, strength=1.0):
     """
     Applies a watermark to an image.
     
@@ -18,6 +18,7 @@ def apply_watermark(base_image_path, watermark_path, output_path, position="bott
         max_pixels (int): Maximum number of pixels for the output image. If input is larger, it will be resized.
         mode (str): Watermarking mode. 'standard', 'difference', or 'negate'.
         angle (float): Rotation angle of the watermark in degrees.
+        strength (float): Strength/Opacity of the watermark (0.0 - 1.0).
     
     Returns:
         bool: True if successful, False otherwise.
@@ -39,10 +40,11 @@ def apply_watermark(base_image_path, watermark_path, output_path, position="bott
 
         watermark = Image.open(watermark_path).convert("RGBA")
 
-        # Calculate watermark size
-        target_width = int(base.width * size)
+        # Calculate watermark size based on its original dimensions
+        original_watermark_width, original_watermark_height = watermark.size
+        target_width = int(original_watermark_width * size)
         if target_width < 1: target_width = 1
-        aspect_ratio = watermark.height / watermark.width
+        aspect_ratio = original_watermark_height / original_watermark_width
         target_height = int(target_width * aspect_ratio)
         if target_height < 1: target_height = 1
         
@@ -52,6 +54,13 @@ def apply_watermark(base_image_path, watermark_path, output_path, position="bott
         if angle != 0:
             watermark_resized = watermark_resized.rotate(angle, expand=True, resample=Image.BICUBIC)
             target_width, target_height = watermark_resized.size
+
+        # Apply strength (opacity)
+        if strength < 1.0:
+            strength = max(0.0, strength)
+            r, g, b, a = watermark_resized.split()
+            a = a.point(lambda p: int(p * strength))
+            watermark_resized = Image.merge("RGBA", (r, g, b, a))
 
         # Create a transparent layer for the watermark content
         # For 'standard', we paste the watermark here.
@@ -173,6 +182,7 @@ def main():
     parser.add_argument("--mode", default="standard", choices=["standard", "difference", "negate"],
                         help="Watermark blending mode. 'standard' (overlay), 'difference' (color diff), or 'negate' (inversion).")
     parser.add_argument("--angle", type=float, default=0, help="Rotation angle of the watermark in degrees.")
+    parser.add_argument("--strength", type=float, default=1.0, help="Watermark strength/opacity (0.0 - 1.0).")
 
     args = parser.parse_args()
     
@@ -199,7 +209,7 @@ def main():
                 output_path = os.path.join(args.output_image, output_filename)
                 
                 print(f"Processing {filename} -> {output_filename}...")
-                if apply_watermark(input_path, args.watermark_image, output_path, args.position, args.size, max_pixels, args.mode, args.angle):
+                if apply_watermark(input_path, args.watermark_image, output_path, args.position, args.size, max_pixels, args.mode, args.angle, args.strength):
                     processed_count += 1
                 else:
                     print(f"Failed to process {filename}")
@@ -209,7 +219,7 @@ def main():
 
     else:
         # Single file processing
-        if apply_watermark(args.base_image, args.watermark_image, args.output_image, args.position, args.size, max_pixels, args.mode, args.angle):
+        if apply_watermark(args.base_image, args.watermark_image, args.output_image, args.position, args.size, max_pixels, args.mode, args.angle, args.strength):
             print(f"Successfully saved to {args.output_image}")
             sys.exit(0)
         else:
