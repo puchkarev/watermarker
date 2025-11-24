@@ -40,6 +40,31 @@ source venv/bin/activate
 python3 watermarker.py
 ```
 
+## CLI Usage
+
+The core watermarking logic can be used independently as a command-line tool via `watermarker_core.py`.
+
+### Single Image
+```bash
+python3 watermarker_core.py input.jpg watermark.png output.jpg --position "top right" --size 0.2
+```
+
+### Batch Processing
+Process an entire folder of images. This mode automatically converts outputs to **WebP** format.
+```bash
+python3 watermarker_core.py ./input_folder ./watermark.png ./output_folder
+```
+
+### Options
+- `--position`: Where to place the watermark (e.g., `center`, `bottom right`, `repeated`). Default: `bottom right`.
+- `--size`: Size of watermark as a fraction of image width (0.0 - 1.0). Default: `0.25`.
+- `--resize-8mp`: Resize output images to a maximum of 8 megapixels (approx 3266x2449) if the input is larger. Maintains aspect ratio.
+
+```bash
+# Example: Batch process, resize to 8MP, 15% watermark size
+python3 watermarker_core.py ./raw_photos ./logo.png ./processed --size 0.15 --resize-8mp
+```
+
 ## Usage
 
 1.  Start a chat with the bot.
