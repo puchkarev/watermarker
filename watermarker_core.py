@@ -1,9 +1,9 @@
 import argparse
 import sys
 import os
-from PIL import Image
+from PIL import Image, ImageChops
 
-def apply_watermark(base_image_path, watermark_path, output_path, position="bottom right", size=0.25, max_pixels=None):
+def apply_watermark(base_image_path, watermark_path, output_path, position="bottom right", size=0.25, max_pixels=None, mode="standard"):
     """
     Applies a watermark to an image.
     
@@ -16,6 +16,7 @@ def apply_watermark(base_image_path, watermark_path, output_path, position="bott
                                  'bottom left', 'bottom', 'bottom right', 'repeated'.
         size (float): Size of the watermark as a fraction of the base image width (0.0 - 1.0).
         max_pixels (int): Maximum number of pixels for the output image. If input is larger, it will be resized.
+        mode (str): Watermarking mode. 'standard', 'difference', or 'negate'.
     
     Returns:
         bool: True if successful, False otherwise.
@@ -46,16 +47,20 @@ def apply_watermark(base_image_path, watermark_path, output_path, position="bott
         
         watermark_resized = watermark.resize((target_width, target_height), Image.Resampling.LANCZOS)
         
-        # Create a transparent layer for the watermark
-        transparent = Image.new('RGBA', base.size, (0, 0, 0, 0))
+        # Create a transparent layer for the watermark content
+        # For 'standard', we paste the watermark here.
+        # For others, we might need a mask.
+        
+        watermark_layer = Image.new('RGBA', base.size, (0, 0, 0, 0))
         
         padding = int(base.width * 0.02)
         
+        positions = []
         if position == "repeated":
             # Tile the watermark
             for y in range(0, base.height, target_height + padding):
                 for x in range(0, base.width, target_width + padding):
-                    transparent.paste(watermark_resized, (x, y))
+                    positions.append((x, y))
         else:
             # Calculate coordinates
             # Default to bottom right
@@ -89,11 +94,51 @@ def apply_watermark(base_image_path, watermark_path, output_path, position="bott
             elif position == "bottom right":
                 x = base.width - target_width - padding
                 y = base.height - target_height - padding
+            
+            positions.append((x, y))
 
-            transparent.paste(watermark_resized, (x, y))
+        # Paste watermark onto the layer
+        for pos in positions:
+            watermark_layer.paste(watermark_resized, pos)
+
+        # Apply based on mode
+        if mode == "standard":
+            # Composite
+            result = Image.alpha_composite(base, watermark_layer)
         
-        # Composite
-        result = Image.alpha_composite(base, transparent)
+        elif mode == "difference":
+            # Difference mode: |Base - Watermark|
+            # We only apply this where the watermark exists.
+            
+            # Extract RGB channels
+            base_rgb = base.convert("RGB")
+            wm_rgb = watermark_layer.convert("RGB")
+            wm_a = watermark_layer.split()[3]
+            
+            # Calculate difference
+            diff_rgb = ImageChops.difference(base_rgb, wm_rgb)
+            
+            # Blend diff and base using watermark alpha
+            # If alpha is 255, we see diff. If 0, we see base.
+            result_rgb = Image.composite(diff_rgb, base_rgb, wm_a)
+            result = result_rgb.convert("RGBA")
+
+        elif mode == "negate":
+            # Invert mode: Invert base image where watermark is opaque
+            # Result = Base * (1-Alpha) + (1-Base) * Alpha  (conceptually)
+            
+            base_rgb = base.convert("RGB")
+            wm_a = watermark_layer.split()[3]
+            
+            inverted_base = ImageChops.invert(base_rgb)
+            
+            # Composite inverted base and original base using mask
+            result_rgb = Image.composite(inverted_base, base_rgb, wm_a)
+            result = result_rgb.convert("RGBA")
+            
+        else:
+            # Fallback to standard
+            result = Image.alpha_composite(base, watermark_layer)
         
         # Save logic
         # If output path implies a specific format, use it.
@@ -119,6 +164,8 @@ def main():
                         help="Position of the watermark")
     parser.add_argument("--size", type=float, default=0.25, help="Size fraction (0.0 - 1.0)")
     parser.add_argument("--resize-8mp", action="store_true", help="Resize output to approx 8 megapixels (maintain aspect ratio)")
+    parser.add_argument("--mode", default="standard", choices=["standard", "difference", "negate"],
+                        help="Watermark blending mode. 'standard' (overlay), 'difference' (color diff), or 'negate' (inversion).")
 
     args = parser.parse_args()
     
@@ -145,7 +192,7 @@ def main():
                 output_path = os.path.join(args.output_image, output_filename)
                 
                 print(f"Processing {filename} -> {output_filename}...")
-                if apply_watermark(input_path, args.watermark_image, output_path, args.position, args.size, max_pixels):
+                if apply_watermark(input_path, args.watermark_image, output_path, args.position, args.size, max_pixels, args.mode):
                     processed_count += 1
                 else:
                     print(f"Failed to process {filename}")
@@ -155,7 +202,7 @@ def main():
 
     else:
         # Single file processing
-        if apply_watermark(args.base_image, args.watermark_image, args.output_image, args.position, args.size, max_pixels):
+        if apply_watermark(args.base_image, args.watermark_image, args.output_image, args.position, args.size, max_pixels, args.mode):
             print(f"Successfully saved to {args.output_image}")
             sys.exit(0)
         else:

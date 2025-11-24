@@ -59,10 +59,14 @@ python3 watermarker_core.py ./input_folder ./watermark.png ./output_folder
 - `--position`: Where to place the watermark (e.g., `center`, `bottom right`, `repeated`). Default: `bottom right`.
 - `--size`: Size of watermark as a fraction of image width (0.0 - 1.0). Default: `0.25`.
 - `--resize-8mp`: Resize output images to a maximum of 8 megapixels (approx 3266x2449) if the input is larger. Maintains aspect ratio.
+- `--mode`: Blending mode.
+    - `standard`: Normal overlay (alpha blending). Default.
+    - `difference`: Calculates absolute difference. Good for high contrast visibility on any background.
+    - `negate`: Inverts the background image color where the watermark is present.
 
 ```bash
-# Example: Batch process, resize to 8MP, 15% watermark size
-python3 watermarker_core.py ./raw_photos ./logo.png ./processed --size 0.15 --resize-8mp
+# Example: Batch process, resize to 8MP, 15% watermark size, using difference mode
+python3 watermarker_core.py ./raw_photos ./logo.png ./processed --size 0.15 --resize-8mp --mode difference
 ```
 
 ## Usage
