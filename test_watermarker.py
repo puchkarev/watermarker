@@ -78,7 +78,8 @@ class TestWatermarker(unittest.TestCase):
         output_path = os.path.join(watermarker.TEMP_DIR, "output.png")
         settings = {"position": "bottom right", "size": 0.25}
         
-        result = watermarker.apply_watermark(base_path, watermark_path, output_path, settings)
+        # Use unpacked arguments
+        result = watermarker.apply_watermark(base_path, watermark_path, output_path, position=settings["position"], size=settings["size"])
         self.assertTrue(result)
         self.assertTrue(os.path.exists(output_path))
         
@@ -95,9 +96,8 @@ class TestWatermarker(unittest.TestCase):
         watermark_img.save(watermark_path)
 
         output_path = os.path.join(watermarker.TEMP_DIR, "output_tiled.png")
-        settings = {"position": "repeated", "size": 0.1} # 50px width
         
-        result = watermarker.apply_watermark(base_path, watermark_path, output_path, settings)
+        result = watermarker.apply_watermark(base_path, watermark_path, output_path, position="repeated", size=0.1)
         self.assertTrue(result)
 
     @patch('watermarker.tele.send_telegram')
@@ -146,8 +146,11 @@ class TestWatermarker(unittest.TestCase):
         
         mock_get_file.assert_called()
         mock_apply.assert_called()
-        # Verify apply was called with settings (dict) as last arg
-        self.assertIsInstance(mock_apply.call_args[0][3], dict)
+        
+        # Verify kwargs are used
+        self.assertIn("position", mock_apply.call_args[1])
+        self.assertIn("size", mock_apply.call_args[1])
+        
         mock_send_file.assert_called()
 
 if __name__ == '__main__':
