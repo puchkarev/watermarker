@@ -55,7 +55,7 @@ class TestWatermarker(unittest.TestCase):
     def test_settings_persistence(self):
         chat_id = "test_chat"
         defaults = watermarker.load_settings(chat_id)
-        self.assertEqual(defaults["position"], "bottom right")
+        self.assertEqual(defaults["position"], "repeated")
         
         new_settings = {"position": "top left", "size": 0.5}
         watermarker.save_settings(chat_id, new_settings)
@@ -257,7 +257,47 @@ class TestWatermarker(unittest.TestCase):
         self.assertIn("position", mock_apply.call_args[1])
         self.assertIn("size", mock_apply.call_args[1])
         self.assertIn("strength", mock_apply.call_args[1])
+        self.assertIn("angle", mock_apply.call_args[1])
+        self.assertIn("mode", mock_apply.call_args[1])
         
+        mock_send_file.assert_called()
+
+    @patch('watermarker.tele.send_telegram_file')
+    @patch('watermarker.tele.get_telegram_file')
+    @patch('watermarker.apply_watermark')
+    @patch('zipfile.ZipFile')
+    @patch('shutil.make_archive')
+    def test_process_document_zip(self, mock_make_archive, mock_zipfile, mock_apply, mock_get_file, mock_send_file):
+        chat_id = 123
+        doc = {"file_id": "zip_id", "file_name": "images.zip", "mime_type": "application/zip"}
+        
+        # Setup mocks
+        mock_get_file.return_value = "images.zip"
+        # Mock zip extraction: just do nothing or simulate walk?
+        # Since we use os.walk on extract_dir, we need to ensure extract_dir exists and has files.
+        # But ZipFile is mocked. So we need to manually create files in the expected extract dir
+        # AFTER zip extraction call.
+        
+        # We can't easily mock the side effect of extractall unless we use side_effect.
+        def extract_side_effect(path):
+            # Create a dummy file in path
+            os.makedirs(path, exist_ok=True)
+            with open(os.path.join(path, "test.jpg"), 'w') as f:
+                f.write("dummy")
+                
+        mock_zip_instance = MagicMock()
+        mock_zip_instance.extractall.side_effect = extract_side_effect
+        mock_zipfile.return_value.__enter__.return_value = mock_zip_instance
+        
+        mock_apply.return_value = True
+        
+        watermarker.process_document("token", chat_id, doc)
+        
+        mock_get_file.assert_called()
+        mock_zipfile.assert_called()
+        # mock_apply should be called for test.jpg
+        mock_apply.assert_called()
+        mock_make_archive.assert_called()
         mock_send_file.assert_called()
 
 if __name__ == '__main__':
