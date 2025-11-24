@@ -92,6 +92,7 @@ def process_text(bot_token, chat_id, text):
 
     help_text = (
         "Welcome to Watermarker Bot!\n\n"
+        "GitHub Repo: https://github.com/puchkarev/watermarker\n\n"
         "I can apply watermarks to your images. Send me a photo directly or a ZIP file containing multiple images. "
         "I'll process them and send them back to you, converting all output images to WebP (max 8MP by default for single images, or as configured).\n\n"
         "Available commands:\n"
