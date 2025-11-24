@@ -36,7 +36,7 @@ A Telegram bot service that adds watermarks to images.
 
 For production environments, you can use the provided deployment script to fetch the latest nightly release, set up the environment, and manage the service.
 
-1.  **Prerequisites**: Ensure `unzip`, `curl`, and `python3` are installed.
+1.  **Prerequisites**: The script requires `unzip`, `curl`, and `python3`. It will attempt to install them (asking for `sudo` permission) if they are missing.
 2.  **Run**:
     ```bash
     # Basic usage (prompts for setup if needed)

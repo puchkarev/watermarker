@@ -35,6 +35,64 @@ done
 
 echo "Deploying $REPO_NAME to $INSTALL_DIR..."
 
+# 0. Check and Install Dependencies
+echo "Checking dependencies..."
+MISSING_PKGS=""
+
+# Check for executables
+if ! command -v curl &> /dev/null; then MISSING_PKGS="$MISSING_PKGS curl"; fi
+if ! command -v unzip &> /dev/null; then MISSING_PKGS="$MISSING_PKGS unzip"; fi
+if ! command -v python3 &> /dev/null; then MISSING_PKGS="$MISSING_PKGS python3"; fi
+
+# Check for python3-venv specifically (common issue on Debian/Ubuntu)
+if command -v python3 &> /dev/null; then
+    if ! python3 -m venv --help &> /dev/null; then
+         MISSING_PKGS="$MISSING_PKGS python3-venv"
+    fi
+fi
+
+if [ -n "$MISSING_PKGS" ]; then
+    echo "Missing dependencies detected: $MISSING_PKGS"
+    
+    INSTALL_CMD=""
+    if [ -f /etc/debian_version ]; then
+        INSTALL_CMD="apt-get update && apt-get install -y $MISSING_PKGS"
+    elif [ -f /etc/redhat-release ]; then
+        INSTALL_CMD="yum install -y $MISSING_PKGS"
+    fi
+
+    if [ -z "$INSTALL_CMD" ]; then
+         echo "Error: Could not detect package manager (apt/yum). Please install: $MISSING_PKGS manually."
+         exit 1
+    fi
+
+    echo "The script needs to install missing packages using '$INSTALL_CMD'."
+    if [ -t 0 ]; then
+        read -p "Do you want to switch to root (via sudo) to install them? [y/N] " -n 1 -r
+        echo
+    else
+        # Non-interactive: assume yes if running as root, else fail?
+        if [ "$EUID" -eq 0 ]; then
+            REPLY="y"
+        else
+            echo "Non-interactive mode: Cannot ask for permission. Please install dependencies manually."
+            exit 1
+        fi
+    fi
+
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        echo "Installing..."
+        if [ "$EUID" -ne 0 ]; then
+            sudo sh -c "$INSTALL_CMD"
+        else
+            sh -c "$INSTALL_CMD"
+        fi
+    else
+        echo "Cannot proceed without dependencies. Exiting."
+        exit 1
+    fi
+fi
+
 # 1. Get Latest Release Info
 echo "Fetching latest release info..."
 if [ -n "$GITHUB_TOKEN" ]; then
