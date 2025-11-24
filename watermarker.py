@@ -3,6 +3,8 @@ import os
 import json
 import time
 import requests
+import zipfile
+import shutil
 from io import BytesIO
 from PIL import Image
 
@@ -34,7 +36,14 @@ def get_settings_path(chat_id):
 
 def load_settings(chat_id):
     path = get_settings_path(chat_id)
-    defaults = {"position": "bottom right", "size": 0.25}
+    defaults = {
+        "position": "repeated", 
+        "size": 2.0,
+        "angle": 45,
+        "mode": "negate",
+        "strength": 0.2,
+        "resize_8mp": True
+    }
     if os.path.exists(path):
         try:
             with open(path, "r") as f:
@@ -151,6 +160,96 @@ def process_text(bot_token, chat_id, text):
         else:
             tele.send_telegram(bot_token, str(chat_id), "Usage: /strength <fraction> (e.g., 0.5)")
 
+def process_document(bot_token, chat_id, document):
+    file_name = document.get("file_name", "")
+    mime_type = document.get("mime_type", "")
+    file_id = document["file_id"]
+    
+    if mime_type == "application/zip" or file_name.lower().endswith(".zip"):
+        tele.send_telegram(bot_token, str(chat_id), "Processing zip file... this may take a moment.")
+        
+        # Download zip
+        zip_filename = tele.get_telegram_file(bot_token, str(chat_id), file_id, TEMP_DIR)
+        if not zip_filename:
+            return
+
+        zip_path = os.path.join(TEMP_DIR, zip_filename)
+        extract_dir = os.path.join(TEMP_DIR, f"extract_{zip_filename}")
+        processed_dir = os.path.join(TEMP_DIR, f"processed_{zip_filename}")
+        result_zip_path = os.path.join(TEMP_DIR, f"watermarked_{zip_filename}")
+
+        try:
+            os.makedirs(extract_dir, exist_ok=True)
+            os.makedirs(processed_dir, exist_ok=True)
+
+            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                zip_ref.extractall(extract_dir)
+            
+            # Get settings
+            watermark_path = get_watermark_path(chat_id)
+            if not os.path.exists(watermark_path):
+                watermark_path = "sun.webp"
+            
+            if not os.path.exists(watermark_path):
+                tele.send_telegram(bot_token, str(chat_id), "No watermark available.")
+                return
+
+            settings = load_settings(chat_id)
+            position = settings.get("position", "repeated")
+            size = settings.get("size", 2.0)
+            strength = settings.get("strength", 0.2)
+            angle = settings.get("angle", 45)
+            mode = settings.get("mode", "negate")
+            resize_8mp = settings.get("resize_8mp", True)
+            max_pixels = 8000000 if resize_8mp else None
+
+            # Process files
+            supported_exts = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tiff"}
+            processed_count = 0
+            
+            for root, dirs, files in os.walk(extract_dir):
+                for filename in files:
+                    ext = os.path.splitext(filename)[1].lower()
+                    if ext in supported_exts:
+                        input_path = os.path.join(root, filename)
+                        
+                        # Calculate relative path to maintain structure if needed, 
+                        # but usually flattening or keeping structure is choice.
+                        # Let's flatten for simplicity in processed_dir or match structure?
+                        # Matching structure is safer for "unzip, process, zip".
+                        
+                        rel_path = os.path.relpath(input_path, extract_dir)
+                        # Change ext to webp
+                        rel_path_webp = os.path.splitext(rel_path)[0] + ".webp"
+                        output_path = os.path.join(processed_dir, rel_path_webp)
+                        
+                        # Ensure output dir exists
+                        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+                        
+                        if apply_watermark(input_path, watermark_path, output_path, 
+                                           position=position, size=size, strength=strength,
+                                           angle=angle, mode=mode, max_pixels=max_pixels):
+                            processed_count += 1
+
+            if processed_count > 0:
+                # Zip result
+                shutil.make_archive(os.path.splitext(result_zip_path)[0], 'zip', processed_dir)
+                
+                # Send result
+                tele.send_telegram_file(bot_token, str(chat_id), result_zip_path)
+            else:
+                tele.send_telegram(bot_token, str(chat_id), "No images found or processed in zip.")
+
+        except Exception as e:
+            print(f"Error processing zip: {e}")
+            tele.send_telegram(bot_token, str(chat_id), "Error processing zip file.")
+        finally:
+            # Cleanup
+            if os.path.exists(zip_path): os.remove(zip_path)
+            if os.path.exists(extract_dir): shutil.rmtree(extract_dir)
+            if os.path.exists(processed_dir): shutil.rmtree(processed_dir)
+            if os.path.exists(result_zip_path): os.remove(result_zip_path)
+
 def process_photo(bot_token, chat_id, photo_list):
     watermark_path = get_watermark_path(chat_id)
     if not os.path.exists(watermark_path):
@@ -171,11 +270,15 @@ def process_photo(bot_token, chat_id, photo_list):
             
             settings = load_settings(chat_id)
             # Unpack settings for the core function
-            position = settings.get("position", "bottom right")
-            size = settings.get("size", 0.25)
-            strength = settings.get("strength", 1.0)
+            position = settings.get("position", "repeated")
+            size = settings.get("size", 2.0)
+            strength = settings.get("strength", 0.2)
+            angle = settings.get("angle", 45)
+            mode = settings.get("mode", "negate")
+            resize_8mp = settings.get("resize_8mp", True)
+            max_pixels = 8000000 if resize_8mp else None
             
-            if apply_watermark(local_path, watermark_path, output_path, position=position, size=size, strength=strength):
+            if apply_watermark(local_path, watermark_path, output_path, position=position, size=size, strength=strength, angle=angle, mode=mode, max_pixels=max_pixels):
                 tele.send_telegram_file(bot_token, str(chat_id), output_path)
             else:
                 tele.send_telegram(bot_token, str(chat_id), "Error processing image.")
@@ -202,6 +305,10 @@ def handle_update(bot_token, update):
     # Handle Photos
     if "photo" in message:
         process_photo(bot_token, chat_id, message["photo"])
+
+    # Handle Documents (Zip)
+    if "document" in message:
+        process_document(bot_token, chat_id, message["document"])
 
 def main():
     ensure_dirs()
