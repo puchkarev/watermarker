@@ -5,9 +5,10 @@ A Telegram bot service that adds watermarks to images.
 ## Features
 
 -   **Set Watermark**: Use `/source <url>` to set a watermark image for the current chat.
+-   **Customize Position**: Use `/position` to place the watermark (9 positions or tiled).
+-   **Customize Size**: Use `/size` to scale the watermark relative to the image.
 -   **Auto-Watermark**: Send any image to the bot, and it will reply with the watermarked version.
--   **Per-Chat Config**: Each chat can have its own unique watermark.
--   **Smart Resizing**: The watermark is automatically resized to 25% of the target image's width and placed in the bottom-right corner.
+-   **Per-Chat Config**: Each chat has its own watermark, position, and size settings.
 
 ## Installation
 
@@ -42,9 +43,11 @@ python3 watermarker.py
 ## Usage
 
 1.  Start a chat with the bot.
-2.  Send `/source https://example.com/my_logo.png` to set your watermark.
-3.  Send an image (photo) to the bot.
-4.  Receive the watermarked image back.
+2.  **Set Watermark**: `/source https://example.com/my_logo.png`
+3.  **Set Position**: `/position top left` (or top, top right, left, center, right, bottom left, bottom, bottom right, repeated)
+4.  **Set Size**: `/size 0.1` (sets watermark to 10% of image width)
+5.  **Get Help**: `/help`
+6.  **Apply**: Send an image (photo) to the bot.
 
 ## Testing
 

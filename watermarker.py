@@ -12,6 +12,7 @@ import tele
 
 WATERMARKS_DIR = "watermarks"
 TEMP_DIR = "temp"
+SETTINGS_DIR = "settings"
 
 def load_config():
     with open("config.json", "r") as f:
@@ -22,6 +23,30 @@ def ensure_dirs():
         os.makedirs(WATERMARKS_DIR)
     if not os.path.exists(TEMP_DIR):
         os.makedirs(TEMP_DIR)
+    if not os.path.exists(SETTINGS_DIR):
+        os.makedirs(SETTINGS_DIR)
+
+def get_settings_path(chat_id):
+    return os.path.join(SETTINGS_DIR, f"{chat_id}.json")
+
+def load_settings(chat_id):
+    path = get_settings_path(chat_id)
+    defaults = {"position": "bottom right", "size": 0.25}
+    if os.path.exists(path):
+        try:
+            with open(path, "r") as f:
+                saved = json.load(f)
+                defaults.update(saved)
+        except Exception as e:
+            print(f"Error loading settings for {chat_id}: {e}")
+    return defaults
+
+def save_settings(chat_id, settings):
+    try:
+        with open(get_settings_path(chat_id), "w") as f:
+            json.dump(settings, f)
+    except Exception as e:
+        print(f"Error saving settings for {chat_id}: {e}")
 
 def get_watermark_path(chat_id):
     return os.path.join(WATERMARKS_DIR, f"{chat_id}.png")
@@ -44,31 +69,68 @@ def set_watermark(chat_id, url):
         print(f"Error setting watermark: {e}")
         return False
 
-def apply_watermark(base_image_path, watermark_path, output_path):
+def apply_watermark(base_image_path, watermark_path, output_path, settings):
     try:
         base = Image.open(base_image_path).convert("RGBA")
         watermark = Image.open(watermark_path).convert("RGBA")
 
-        # Calculate watermark size (25% of base image width)
-        target_width = int(base.width * 0.25)
+        size_fraction = settings.get("size", 0.25)
+        position = settings.get("position", "bottom right")
+
+        # Calculate watermark size
+        target_width = int(base.width * size_fraction)
+        if target_width < 1: target_width = 1
         aspect_ratio = watermark.height / watermark.width
         target_height = int(target_width * aspect_ratio)
+        if target_height < 1: target_height = 1
         
         watermark_resized = watermark.resize((target_width, target_height), Image.Resampling.LANCZOS)
         
-        # Position: Bottom Right with some padding (e.g., 5% of width)
-        # Or just exactly in the corner? "bottom right corner" usually implies some margin or flush.
-        # "taking 25% of the image" - I'm using 25% width. 
-        # I'll put it flush in the corner or with small padding? I'll use flush for simplicity unless it looks bad.
-        # Let's add 10px padding or 2% padding.
-        padding = int(base.width * 0.02)
-        x = base.width - target_width - padding
-        y = base.height - target_height - padding
-        
-        # Paste watermark
         # Create a transparent layer for the watermark
         transparent = Image.new('RGBA', base.size, (0, 0, 0, 0))
-        transparent.paste(watermark_resized, (x, y))
+        
+        padding = int(base.width * 0.02)
+        
+        if position == "repeated":
+            # Tile the watermark
+            for y in range(0, base.height, target_height + padding):
+                for x in range(0, base.width, target_width + padding):
+                    transparent.paste(watermark_resized, (x, y))
+        else:
+            # Calculate coordinates
+            # Default to bottom right
+            x = base.width - target_width - padding
+            y = base.height - target_height - padding
+            
+            if position == "top left":
+                x = padding
+                y = padding
+            elif position == "top":
+                x = (base.width - target_width) // 2
+                y = padding
+            elif position == "top right":
+                x = base.width - target_width - padding
+                y = padding
+            elif position == "left":
+                x = padding
+                y = (base.height - target_height) // 2
+            elif position == "center":
+                x = (base.width - target_width) // 2
+                y = (base.height - target_height) // 2
+            elif position == "right":
+                x = base.width - target_width - padding
+                y = (base.height - target_height) // 2
+            elif position == "bottom left":
+                x = padding
+                y = base.height - target_height - padding
+            elif position == "bottom":
+                x = (base.width - target_width) // 2
+                y = base.height - target_height - padding
+            elif position == "bottom right":
+                x = base.width - target_width - padding
+                y = base.height - target_height - padding
+
+            transparent.paste(watermark_resized, (x, y))
         
         # Composite
         result = Image.alpha_composite(base, transparent)
@@ -84,20 +146,20 @@ def apply_watermark(base_image_path, watermark_path, output_path):
         print(f"Error applying watermark: {e}")
         return False
 
-def main():
-    ensure_dirs()
-    config = load_config()
-    bot_token = config.get("bot_token")
-    if not bot_token:
-        print("Error: bot_token not found in config.json")
-        return
-
-    print("Bot started...")
-    last_update_id = 0
-    
-
 def process_text(bot_token, chat_id, text):
-    if text.startswith("/source"):
+    text = text.strip()
+    
+    if text.startswith("/help"):
+        help_text = (
+            "Available commands:\n"
+            "/source <url> - Set the watermark image for this chat.\n"
+            "/position <pos> - Set watermark position. Options: top left, top, top right, left, center, right, bottom left, bottom, bottom right, repeated.\n"
+            "/size <fraction> - Set watermark size as fraction of image width (e.g. 0.1 for 10%, 0.5 for 50%).\n"
+            "/help - Show this message."
+        )
+        tele.send_telegram(bot_token, str(chat_id), help_text)
+        
+    elif text.startswith("/source"):
         parts = text.split(maxsplit=1)
         if len(parts) == 2:
             url = parts[1]
@@ -107,6 +169,50 @@ def process_text(bot_token, chat_id, text):
                 tele.send_telegram(bot_token, str(chat_id), "Failed to set watermark. Check URL.")
         else:
             tele.send_telegram(bot_token, str(chat_id), "Usage: /source <url>")
+            
+    elif text.startswith("/position"):
+        parts = text.split(maxsplit=1)
+        valid_positions = [
+            "top left", "top", "top right", 
+            "left", "center", "right", 
+            "bottom left", "bottom", "bottom right", 
+            "repeated"
+        ]
+        
+        # Handle "top left" which is two words
+        # A simple split(maxsplit=1) puts the rest in parts[1].
+        # But if the user types "/position top left", parts[1] is "top left".
+        # This works fine.
+        
+        if len(parts) == 2:
+            pos = parts[1].lower().strip()
+            # Normalize spaces if needed, but strict matching is fine for now
+            if pos in valid_positions:
+                settings = load_settings(chat_id)
+                settings["position"] = pos
+                save_settings(chat_id, settings)
+                tele.send_telegram(bot_token, str(chat_id), f"Position set to: {pos}")
+            else:
+                tele.send_telegram(bot_token, str(chat_id), f"Invalid position. Valid: {', '.join(valid_positions)}")
+        else:
+            tele.send_telegram(bot_token, str(chat_id), f"Usage: /position <pos>\nValid: {', '.join(valid_positions)}")
+            
+    elif text.startswith("/size"):
+        parts = text.split(maxsplit=1)
+        if len(parts) == 2:
+            try:
+                size_val = float(parts[1])
+                if 0.0 < size_val <= 1.0:
+                    settings = load_settings(chat_id)
+                    settings["size"] = size_val
+                    save_settings(chat_id, settings)
+                    tele.send_telegram(bot_token, str(chat_id), f"Size set to: {size_val}")
+                else:
+                    tele.send_telegram(bot_token, str(chat_id), "Size must be between 0.0 and 1.0")
+            except ValueError:
+                tele.send_telegram(bot_token, str(chat_id), "Invalid number format.")
+        else:
+            tele.send_telegram(bot_token, str(chat_id), "Usage: /size <fraction> (e.g., 0.25)")
 
 def process_photo(bot_token, chat_id, photo_list):
     watermark_path = get_watermark_path(chat_id)
@@ -121,7 +227,8 @@ def process_photo(bot_token, chat_id, photo_list):
             local_path = os.path.join(TEMP_DIR, filename)
             output_path = os.path.join(TEMP_DIR, f"watermarked_{filename}")
             
-            if apply_watermark(local_path, watermark_path, output_path):
+            settings = load_settings(chat_id)
+            if apply_watermark(local_path, watermark_path, output_path, settings):
                 tele.send_telegram_file(bot_token, str(chat_id), output_path)
             else:
                 tele.send_telegram(bot_token, str(chat_id), "Error processing image.")
@@ -156,6 +263,15 @@ def main():
     if not bot_token:
         print("Error: bot_token not found in config.json")
         return
+    
+    # Set bot commands
+    commands = {
+        "source": "Set the watermark image URL",
+        "position": "Set watermark position",
+        "size": "Set watermark size (0.0 - 1.0)",
+        "help": "Show available commands"
+    }
+    tele.telegram_set_commands(bot_token, commands)
 
     print("Bot started...")
     last_update_id = 0
