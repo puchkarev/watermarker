@@ -3,7 +3,7 @@ import sys
 import os
 from PIL import Image, ImageChops
 
-def apply_watermark(base_image_path, watermark_path, output_path, position="bottom right", size=0.25, max_pixels=None, mode="standard", angle=0, strength=1.0):
+def apply_watermark(base_image_path, watermark_path="sun.webp", output_path="output.webp", position="bottom right", size=0.25, max_pixels=None, mode="standard", angle=0, strength=1.0):
     """
     Applies a watermark to an image.
     
@@ -72,10 +72,17 @@ def apply_watermark(base_image_path, watermark_path, output_path, position="bott
         
         positions = []
         if position == "repeated":
-            # Tile the watermark
+            # Tile the watermark with brick offset
+            row_index = 0
             for y in range(0, base.height, target_height + padding):
-                for x in range(0, base.width, target_width + padding):
+                offset = 0
+                if row_index % 2 == 1:
+                    offset = (target_width + padding) // 2
+                
+                # Start x from -offset to ensure coverage on the left
+                for x in range(-offset, base.width, target_width + padding):
                     positions.append((x, y))
+                row_index += 1
         else:
             # Calculate coordinates
             # Default to bottom right
