@@ -134,6 +134,23 @@ def process_text(bot_token, chat_id, text):
         else:
             tele.send_telegram(bot_token, str(chat_id), "Usage: /size <fraction> (e.g., 0.25)")
 
+    elif text.startswith("/strength"):
+        parts = text.split(maxsplit=1)
+        if len(parts) == 2:
+            try:
+                strength_val = float(parts[1])
+                if 0.0 <= strength_val <= 1.0:
+                    settings = load_settings(chat_id)
+                    settings["strength"] = strength_val
+                    save_settings(chat_id, settings)
+                    tele.send_telegram(bot_token, str(chat_id), f"Strength set to: {strength_val}")
+                else:
+                    tele.send_telegram(bot_token, str(chat_id), "Strength must be between 0.0 and 1.0")
+            except ValueError:
+                tele.send_telegram(bot_token, str(chat_id), "Invalid number format.")
+        else:
+            tele.send_telegram(bot_token, str(chat_id), "Usage: /strength <fraction> (e.g., 0.5)")
+
 def process_photo(bot_token, chat_id, photo_list):
     watermark_path = get_watermark_path(chat_id)
     if not os.path.exists(watermark_path):
@@ -156,8 +173,9 @@ def process_photo(bot_token, chat_id, photo_list):
             # Unpack settings for the core function
             position = settings.get("position", "bottom right")
             size = settings.get("size", 0.25)
+            strength = settings.get("strength", 1.0)
             
-            if apply_watermark(local_path, watermark_path, output_path, position=position, size=size):
+            if apply_watermark(local_path, watermark_path, output_path, position=position, size=size, strength=strength):
                 tele.send_telegram_file(bot_token, str(chat_id), output_path)
             else:
                 tele.send_telegram(bot_token, str(chat_id), "Error processing image.")
@@ -198,6 +216,7 @@ def main():
         "source": "Set the watermark image URL",
         "position": "Set watermark position",
         "size": "Set watermark size (fraction of original watermark width)",
+        "strength": "Set watermark opacity (0.0 - 1.0)",
         "help": "Show available commands"
     }
     tele.telegram_set_commands(bot_token, commands)

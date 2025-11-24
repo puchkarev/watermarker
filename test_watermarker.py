@@ -219,6 +219,18 @@ class TestWatermarker(unittest.TestCase):
         watermarker.process_text("token", chat_id, "/size 1.5")
         self.assertIn("Size must be between", mock_send.call_args[0][2])
 
+        # Test Strength Success
+        watermarker.process_text("token", chat_id, "/strength 0.8")
+        self.assertIn("Strength set to: 0.8", mock_send.call_args[0][2])
+
+        # Test Strength Invalid Value
+        watermarker.process_text("token", chat_id, "/strength 1.5")
+        self.assertIn("Strength must be between", mock_send.call_args[0][2])
+        
+        # Test Strength Invalid Format
+        watermarker.process_text("token", chat_id, "/strength abc")
+        self.assertIn("Invalid number format", mock_send.call_args[0][2])
+
     @patch('watermarker.tele.send_telegram_file')
     @patch('watermarker.tele.get_telegram_file')
     @patch('watermarker.apply_watermark')
@@ -244,6 +256,7 @@ class TestWatermarker(unittest.TestCase):
         # Verify kwargs are used
         self.assertIn("position", mock_apply.call_args[1])
         self.assertIn("size", mock_apply.call_args[1])
+        self.assertIn("strength", mock_apply.call_args[1])
         
         mock_send_file.assert_called()
 
