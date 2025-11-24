@@ -1,3 +1,3 @@
 [submodule "submodules/telegram"]
 	path = submodules/telegram
-	url = git@github.com:puchkarev/telegram
+	url = ../telegram
