@@ -60,6 +60,12 @@ def save_settings(chat_id, settings):
     except Exception as e:
         print(f"Error saving settings for {chat_id}: {e}")
 
+def _reset_settings(chat_id):
+    path = get_settings_path(chat_id)
+    if os.path.exists(path):
+        os.remove(path)
+        print(f"Settings for {chat_id} reset.")
+
 def get_watermark_path(chat_id):
     return os.path.join(WATERMARKS_DIR, f"{chat_id}.png")
 
@@ -83,16 +89,38 @@ def set_watermark(chat_id, url):
 
 def process_text(bot_token, chat_id, text):
     text = text.strip()
+
+    help_text = (
+        "Welcome to Watermarker Bot!\n\n"
+        "I can apply watermarks to your images. Send me a photo directly or a ZIP file containing multiple images. "
+        "I'll process them and send them back to you, converting all output images to WebP (max 8MP by default for single images, or as configured).\n\n"
+        "Available commands:\n"
+        "/start - Reset your chat settings to default and show this welcome message.\n"
+        "/settings - Show your current watermark settings.\n"
+        "/source <url> - Set the watermark image for this chat. Supports direct image URLs (PNG, JPG, etc.).\n"
+        "/position <pos> - Set watermark position. Options: top left, top, top right, left, center, right, bottom left, bottom, bottom right, repeated.\n"
+        "/size <fraction> - Set watermark size as fraction of watermark's original width (e.1 for 10%, 0.5 for 50%).\n"
+        "/strength <fraction> - Set watermark opacity (0.0 - 1.0). Default: 0.2.\n"
+        "/angle <degrees> - Set watermark rotation angle in degrees (0-360). Default: 45.\n"
+        "/mode <mode> - Set watermark blending mode. Options: standard, difference, negate. Default: negate.\n"
+        "/resize_8mp <true/false> - Enable/disable resizing output images to max 8 megapixels. Default: true.\n"
+        "/help - Show this message."
+    )
     
     if text.startswith("/help"):
-        help_text = (
-            "Available commands:\n"
-            "/source <url> - Set the watermark image for this chat.\n"
-            "/position <pos> - Set watermark position. Options: top left, top, top right, left, center, right, bottom left, bottom, bottom right, repeated.\n"
-            "/size <fraction> - Set watermark size as fraction of watermark's original width (e.g. 0.1 for 10%, 0.5 for 50%).\n"
-            "/help - Show this message."
-        )
         tele.send_telegram(bot_token, str(chat_id), help_text)
+    
+    elif text.startswith("/start"):
+        _reset_settings(chat_id)
+        # Send welcome message after reset
+        tele.send_telegram(bot_token, str(chat_id), help_text)
+    
+    elif text.startswith("/settings"):
+        settings = load_settings(chat_id)
+        settings_text = "Current Settings:\n"
+        for key, value in settings.items():
+            settings_text += f"- {key}: {value}\n"
+        tele.send_telegram(bot_token, str(chat_id), settings_text)
         
     elif text.startswith("/source"):
         parts = text.split(maxsplit=1)
@@ -102,8 +130,6 @@ def process_text(bot_token, chat_id, text):
                 tele.send_telegram(bot_token, str(chat_id), "Watermark set successfully!")
             else:
                 tele.send_telegram(bot_token, str(chat_id), "Failed to set watermark. Check URL.")
-        else:
-            tele.send_telegram(bot_token, str(chat_id), "Usage: /source <url>")
             
     elif text.startswith("/position"):
         parts = text.split(maxsplit=1)
@@ -159,6 +185,52 @@ def process_text(bot_token, chat_id, text):
                 tele.send_telegram(bot_token, str(chat_id), "Invalid number format.")
         else:
             tele.send_telegram(bot_token, str(chat_id), "Usage: /strength <fraction> (e.g., 0.5)")
+
+    elif text.startswith("/angle"):
+        parts = text.split(maxsplit=1)
+        if len(parts) == 2:
+            try:
+                angle_val = float(parts[1])
+                if 0.0 <= angle_val <= 360.0:
+                    settings = load_settings(chat_id)
+                    settings["angle"] = angle_val
+                    save_settings(chat_id, settings)
+                    tele.send_telegram(bot_token, str(chat_id), f"Angle set to: {angle_val}")
+                else:
+                    tele.send_telegram(bot_token, str(chat_id), "Angle must be between 0.0 and 360.0")
+            except ValueError:
+                tele.send_telegram(bot_token, str(chat_id), "Invalid number format.")
+        else:
+            tele.send_telegram(bot_token, str(chat_id), "Usage: /angle <degrees> (e.g., 45)")
+
+    elif text.startswith("/mode"):
+        parts = text.split(maxsplit=1)
+        valid_modes = ["standard", "difference", "negate"]
+        if len(parts) == 2:
+            mode_val = parts[1].lower().strip()
+            if mode_val in valid_modes:
+                settings = load_settings(chat_id)
+                settings["mode"] = mode_val
+                save_settings(chat_id, settings)
+                tele.send_telegram(bot_token, str(chat_id), f"Mode set to: {mode_val}")
+            else:
+                tele.send_telegram(bot_token, str(chat_id), f"Invalid mode. Valid: {', '.join(valid_modes)}")
+        else:
+            tele.send_telegram(bot_token, str(chat_id), f"Usage: /mode <mode>\nValid: {', '.join(valid_modes)}")
+
+    elif text.startswith("/resize_8mp"):
+        parts = text.split(maxsplit=1)
+        if len(parts) == 2:
+            resize_val = parts[1].lower().strip()
+            if resize_val in ["true", "false"]:
+                settings = load_settings(chat_id)
+                settings["resize_8mp"] = (resize_val == "true")
+                save_settings(chat_id, settings)
+                tele.send_telegram(bot_token, str(chat_id), f"Resize to 8MP set to: {settings["resize_8mp"]}")
+            else:
+                tele.send_telegram(bot_token, str(chat_id), "Invalid value. Use 'true' or 'false'.")
+        else:
+            tele.send_telegram(bot_token, str(chat_id), "Usage: /resize_8mp <true/false>")
 
 def process_document(bot_token, chat_id, document):
     file_name = document.get("file_name", "")
@@ -320,10 +392,15 @@ def main():
     
     # Set bot commands
     commands = {
+        "start": "Reset settings and show welcome message",
+        "settings": "Show current watermark settings",
         "source": "Set the watermark image URL",
         "position": "Set watermark position",
         "size": "Set watermark size (fraction of original watermark width)",
         "strength": "Set watermark opacity (0.0 - 1.0)",
+        "angle": "Set watermark rotation angle (0-360)",
+        "mode": "Set watermark blending mode",
+        "resize_8mp": "Toggle 8MP resize for output images",
         "help": "Show available commands"
     }
     tele.telegram_set_commands(bot_token, commands)
