@@ -46,7 +46,7 @@ The core watermarking logic can be used independently as a command-line tool via
 
 ### Single Image
 ```bash
-python3 watermarker_core.py input.jpg watermark.png output.jpg --position "top right" --size 0.2
+python3 watermarker_core.py input.jpg watermark.png output.jpg --position "top right" --size 0.5
 ```
 
 ### Batch Processing
@@ -57,17 +57,18 @@ python3 watermarker_core.py ./input_folder ./watermark.png ./output_folder
 
 ### Options
 - `--position`: Where to place the watermark (e.g., `center`, `bottom right`). Use `repeated` to tile the watermark across the entire image. Default: `bottom right`.
-- `--size`: Size of watermark as a fraction of image width (0.0 - 1.0). Default: `0.25`.
+- `--size`: Size of watermark as a fraction of watermark's original width (0.0 - 1.0). Default: `0.25`.
 - `--resize-8mp`: Resize output images to a maximum of 8 megapixels (approx 3266x2449) if the input is larger. Maintains aspect ratio.
 - `--mode`: Blending mode.
     - `standard`: Normal overlay (alpha blending). Default.
     - `difference`: Calculates absolute difference. Good for high contrast visibility on any background.
     - `negate`: Inverts the background image color where the watermark is present.
 - `--angle`: Rotation angle of the watermark in degrees (counter-clockwise). Default: `0`.
+- `--strength`: Opacity/Strength of the watermark (0.0 - 1.0). Default: `1.0`.
 
 ```bash
 # Example: Batch process, resize to 8MP, 15% watermark size, using difference mode and 45 degree rotation
-python3 watermarker_core.py ./raw_photos ./logo.png ./processed --size 0.15 --resize-8mp --mode difference --angle 45
+python3 watermarker_core.py ./raw_photos ./logo.png ./processed --size 0.15 --resize-8mp --mode difference --angle 45 --strength 0.8
 ```
 
 ## Usage
@@ -75,7 +76,7 @@ python3 watermarker_core.py ./raw_photos ./logo.png ./processed --size 0.15 --re
 1.  Start a chat with the bot.
 2.  **Set Watermark**: `/source https://example.com/my_logo.png`
 3.  **Set Position**: `/position top left` (or top, top right, left, center, right, bottom left, bottom, bottom right, repeated)
-4.  **Set Size**: `/size 0.1` (sets watermark to 10% of image width)
+4.  **Set Size**: `/size 0.1` (sets watermark to 10% of its original width)
 5.  **Get Help**: `/help`
 6.  **Apply**: Send an image (photo) to the bot.
 

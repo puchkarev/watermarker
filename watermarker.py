@@ -80,7 +80,7 @@ def process_text(bot_token, chat_id, text):
             "Available commands:\n"
             "/source <url> - Set the watermark image for this chat.\n"
             "/position <pos> - Set watermark position. Options: top left, top, top right, left, center, right, bottom left, bottom, bottom right, repeated.\n"
-            "/size <fraction> - Set watermark size as fraction of image width (e.g. 0.1 for 10%, 0.5 for 50%).\n"
+            "/size <fraction> - Set watermark size as fraction of watermark's original width (e.g. 0.1 for 10%, 0.5 for 50%).\n"
             "/help - Show this message."
         )
         tele.send_telegram(bot_token, str(chat_id), help_text)
@@ -192,7 +192,7 @@ def main():
     commands = {
         "source": "Set the watermark image URL",
         "position": "Set watermark position",
-        "size": "Set watermark size (0.0 - 1.0)",
+        "size": "Set watermark size (fraction of original watermark width)",
         "help": "Show available commands"
     }
     tele.telegram_set_commands(bot_token, commands)
