@@ -34,20 +34,27 @@ A Telegram bot service that adds watermarks to images.
 
 ### Automated Deployment
 
-For production environments, you can use the provided deployment script to fetch the latest nightly release, update dependencies, and restart the service.
+For production environments, you can use the provided deployment script to fetch the latest nightly release, set up the environment, and manage the service.
 
-1.  **Prerequisites**: Ensure `unzip`, `curl`, and `python3` are installed. The script assumes a systemd service named `watermarker` exists (unless overridden).
+1.  **Prerequisites**: Ensure `unzip`, `curl`, and `python3` are installed.
 2.  **Run**:
     ```bash
-    # Basic usage (if repo is public or already authenticated)
+    # Basic usage (prompts for setup if needed)
     ./scripts/deploy.sh
 
-    # With GitHub Token (for private repos or higher rate limits)
-    ./scripts/deploy.sh --token YOUR_GITHUB_PAT
+    # With GitHub Token (for private repos) and Bot Token (for auto-config)
+    ./scripts/deploy.sh --token YOUR_GITHUB_PAT --bot-token YOUR_TELEGRAM_BOT_TOKEN
 
     # Custom installation directory and service name
     ./scripts/deploy.sh --dir /var/www/watermarker --service my-bot-service
     ```
+
+    The script will:
+    - Download the latest release.
+    - Create the installation directory.
+    - Prompt for your Bot Token and create `config.json` if missing (or use `--bot-token`).
+    - Create and enable a systemd service if one doesn't exist.
+    - Restart the service.
 
 ## Configuration
 
