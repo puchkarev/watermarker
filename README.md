@@ -56,7 +56,7 @@ python3 watermarker_core.py ./input_folder ./watermark.png ./output_folder
 ```
 
 ### Options
-- `--position`: Where to place the watermark (e.g., `center`, `bottom right`, `repeated`). Default: `bottom right`.
+- `--position`: Where to place the watermark (e.g., `center`, `bottom right`). Use `repeated` to tile the watermark across the entire image. Default: `bottom right`.
 - `--size`: Size of watermark as a fraction of image width (0.0 - 1.0). Default: `0.25`.
 - `--resize-8mp`: Resize output images to a maximum of 8 megapixels (approx 3266x2449) if the input is larger. Maintains aspect ratio.
 - `--mode`: Blending mode.
