@@ -226,7 +226,7 @@ def process_text(bot_token, chat_id, text):
                 settings = load_settings(chat_id)
                 settings["resize_8mp"] = (resize_val == "true")
                 save_settings(chat_id, settings)
-                tele.send_telegram(bot_token, str(chat_id), f"Resize to 8MP set to: {settings["resize_8mp"]}")
+                tele.send_telegram(bot_token, str(chat_id), f"Resize to 8MP set to: {settings['resize_8mp']}")
             else:
                 tele.send_telegram(bot_token, str(chat_id), "Invalid value. Use 'true' or 'false'.")
         else:
