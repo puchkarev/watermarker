@@ -136,6 +136,11 @@ def process_text(bot_token, chat_id, text):
 
 def process_photo(bot_token, chat_id, photo_list):
     watermark_path = get_watermark_path(chat_id)
+    if not os.path.exists(watermark_path):
+        # Fallback to default
+        watermark_path = "sun.webp"
+        
+    # Check if watermark (specific or default) exists
     if os.path.exists(watermark_path):
         # Get largest photo
         photo = photo_list[-1]
@@ -163,7 +168,7 @@ def process_photo(bot_token, chat_id, photo_list):
             if os.path.exists(output_path):
                 os.remove(output_path)
     else:
-        tele.send_telegram(bot_token, str(chat_id), "No watermark set. Use /source <url> to set one.")
+        tele.send_telegram(bot_token, str(chat_id), "No watermark set and default 'sun.webp' not found. Use /source <url> to set one.")
 
 def handle_update(bot_token, update):
     if "message" not in update:
