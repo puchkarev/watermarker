@@ -144,6 +144,56 @@ class TestWatermarker(unittest.TestCase):
         # 255 * 0.5 = ~127
         self.assertTrue(100 < center_pixel[0] < 160, f"Pixel value {center_pixel} is not blending correctly")
 
+    def test_apply_watermark_repeated_offset(self):
+        # Base: 200x200 White
+        base_path = os.path.join(watermarker.TEMP_DIR, "base_offset.png")
+        base_img = Image.new('RGB', (200, 200), color='white')
+        base_img.save(base_path)
+
+        # Watermark: 50x50 Black
+        watermark_path = os.path.join(watermarker.WATERMARKS_DIR, "black_tile.png")
+        watermark_img = Image.new('RGBA', (50, 50), color='black')
+        watermark_img.save(watermark_path)
+
+        output_path = os.path.join(watermarker.TEMP_DIR, "output_offset.png")
+        
+        # Apply repeated. Size 0.25 -> 50x50 pixels. Padding ~4px.
+        # Row 0: x=0, x=54, ...
+        # Row 1: y=54. Offset = (50+4)//2 = 27. x=-27, x=27, x=81...
+        # So at (27, 54) we should see the start of a tile (black).
+        
+        result = watermarker.apply_watermark(base_path, watermark_path, output_path, position="repeated", size=1.0) 
+        # size=1.0 relative to original watermark means 50x50.
+        
+        self.assertTrue(result)
+        out_img = Image.open(output_path).convert("RGBA")
+        
+        # Check a pixel that should be black due to offset in the second row
+        # Row 0 height is 50 + padding. Padding = 200*0.02 = 4. 
+        # Row 0 is y=0 to 50. Row 1 starts at y=54.
+        # Row 1 offset is (50+4)//2 = 27.
+        # Tile starts at x=27.
+        # So (30, 60) should be black.
+        
+        # NOTE: Padding calculation is int(base.width * 0.02) = 4.
+        
+        pixel_in_offset_tile = out_img.getpixel((30, 60))
+        self.assertEqual(pixel_in_offset_tile, (0, 0, 0, 255))
+        
+        # Check a pixel that would have been black if NOT offset, but is now white (gap or before tile)
+        # If no offset, tile starts at x=0. x=10 would be black.
+        # With offset 27, x=0 to 27 should be white (padding/gap from previous tile starting at -27).
+        # Previous tile: starts -27. Ends -27+50 = 23. 
+        # So x=10 IS inside the tile from negative start.
+        
+        # Let's check the gap between tiles in Row 1.
+        # Tile 1: 27 to 77.
+        # Tile 2: 27+54 = 81 to 131.
+        # Gap between 77 and 81.
+        # Pixel at (79, 60) should be white.
+        pixel_in_gap = out_img.getpixel((79, 60))
+        self.assertEqual(pixel_in_gap, (255, 255, 255, 255))
+
     @patch('watermarker.tele.send_telegram')
     def test_process_text_commands(self, mock_send):
         chat_id = 123
