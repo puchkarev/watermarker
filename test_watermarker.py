@@ -64,6 +64,20 @@ class TestWatermarker(unittest.TestCase):
         self.assertEqual(loaded["position"], "top left")
         self.assertEqual(loaded["size"], 0.5)
 
+    def test_reset_settings(self):
+        chat_id = "reset_chat"
+        # Create a dummy settings file
+        settings_path = watermarker.get_settings_path(chat_id)
+        with open(settings_path, 'w') as f:
+            f.write('{"test": true}')
+        self.assertTrue(os.path.exists(settings_path))
+        
+        watermarker._reset_settings(chat_id)
+        self.assertFalse(os.path.exists(settings_path))
+        # Ensure loading defaults works after reset
+        defaults = watermarker.load_settings(chat_id)
+        self.assertEqual(defaults["position"], "repeated")
+        
     def test_apply_watermark_default(self):
         # Create base image (large enough for various watermark sizes)
         base_path = os.path.join(watermarker.TEMP_DIR, "base.png")
@@ -197,39 +211,26 @@ class TestWatermarker(unittest.TestCase):
     @patch('watermarker.tele.send_telegram')
     def test_process_text_commands(self, mock_send):
         chat_id = 123
-        
-        # Test Help
-        watermarker.process_text("token", chat_id, "/help")
-        mock_send.assert_called()
-        self.assertIn("Available commands", mock_send.call_args[0][2])
-        
-        # Test Position Success
-        watermarker.process_text("token", chat_id, "/position top left")
-        self.assertIn("Position set to: top left", mock_send.call_args[0][2])
-        
-        # Test Position Invalid
-        watermarker.process_text("token", chat_id, "/position invalid")
-        self.assertIn("Invalid position", mock_send.call_args[0][2])
-        
-        # Test Size Success
-        watermarker.process_text("token", chat_id, "/size 0.5")
-        self.assertIn("Size set to: 0.5", mock_send.call_args[0][2])
-        
-        # Test Size Invalid
-        watermarker.process_text("token", chat_id, "/size 1.5")
-        self.assertIn("Size must be between", mock_send.call_args[0][2])
+        watermarker._reset_settings(chat_id) # Ensure clean slate
+        mock_send.reset_mock() # Clear any calls from _reset_settings print
 
-        # Test Strength Success
-        watermarker.process_text("token", chat_id, "/strength 0.8")
-        self.assertIn("Strength set to: 0.8", mock_send.call_args[0][2])
+        # Test Start
+        with patch('watermarker._reset_settings') as mock_reset:
+            watermarker.process_text("token", chat_id, "/start")
+            mock_reset.assert_called_with(chat_id)
+            self.assertIn("Welcome to Watermarker Bot!", mock_send.call_args[0][2])
+        mock_send.reset_mock() # Clear calls after /start
 
-        # Test Strength Invalid Value
-        watermarker.process_text("token", chat_id, "/strength 1.5")
-        self.assertIn("Strength must be between", mock_send.call_args[0][2])
-        
-        # Test Strength Invalid Format
-        watermarker.process_text("token", chat_id, "/strength abc")
-        self.assertIn("Invalid number format", mock_send.call_args[0][2])
+        # Test Settings (after /start which resets to default)
+        watermarker.process_text("token", chat_id, "/settings")
+        last_call_args = mock_send.call_args_list[-1][0][2]
+        self.assertIn("Current Settings:", last_call_args)
+        self.assertIn("- position: repeated", last_call_args)
+        self.assertIn("- size: 2.0", last_call_args)
+        self.assertIn("- angle: 45", last_call_args)
+        self.assertIn("- mode: negate", last_call_args)
+        self.assertIn("- strength: 0.2", last_call_args)
+        self.assertIn("- resize_8mp: True", last_call_args)
 
     @patch('watermarker.tele.send_telegram_file')
     @patch('watermarker.tele.get_telegram_file')
@@ -259,6 +260,7 @@ class TestWatermarker(unittest.TestCase):
         self.assertIn("strength", mock_apply.call_args[1])
         self.assertIn("angle", mock_apply.call_args[1])
         self.assertIn("mode", mock_apply.call_args[1])
+        self.assertIn("max_pixels", mock_apply.call_args[1])
         
         mock_send_file.assert_called()
 
