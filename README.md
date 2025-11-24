@@ -63,10 +63,11 @@ python3 watermarker_core.py ./input_folder ./watermark.png ./output_folder
     - `standard`: Normal overlay (alpha blending). Default.
     - `difference`: Calculates absolute difference. Good for high contrast visibility on any background.
     - `negate`: Inverts the background image color where the watermark is present.
+- `--angle`: Rotation angle of the watermark in degrees (counter-clockwise). Default: `0`.
 
 ```bash
-# Example: Batch process, resize to 8MP, 15% watermark size, using difference mode
-python3 watermarker_core.py ./raw_photos ./logo.png ./processed --size 0.15 --resize-8mp --mode difference
+# Example: Batch process, resize to 8MP, 15% watermark size, using difference mode and 45 degree rotation
+python3 watermarker_core.py ./raw_photos ./logo.png ./processed --size 0.15 --resize-8mp --mode difference --angle 45
 ```
 
 ## Usage

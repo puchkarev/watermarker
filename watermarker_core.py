@@ -3,7 +3,7 @@ import sys
 import os
 from PIL import Image, ImageChops
 
-def apply_watermark(base_image_path, watermark_path, output_path, position="bottom right", size=0.25, max_pixels=None, mode="standard"):
+def apply_watermark(base_image_path, watermark_path, output_path, position="bottom right", size=0.25, max_pixels=None, mode="standard", angle=0):
     """
     Applies a watermark to an image.
     
@@ -17,6 +17,7 @@ def apply_watermark(base_image_path, watermark_path, output_path, position="bott
         size (float): Size of the watermark as a fraction of the base image width (0.0 - 1.0).
         max_pixels (int): Maximum number of pixels for the output image. If input is larger, it will be resized.
         mode (str): Watermarking mode. 'standard', 'difference', or 'negate'.
+        angle (float): Rotation angle of the watermark in degrees.
     
     Returns:
         bool: True if successful, False otherwise.
@@ -47,6 +48,11 @@ def apply_watermark(base_image_path, watermark_path, output_path, position="bott
         
         watermark_resized = watermark.resize((target_width, target_height), Image.Resampling.LANCZOS)
         
+        # Rotate if needed
+        if angle != 0:
+            watermark_resized = watermark_resized.rotate(angle, expand=True, resample=Image.BICUBIC)
+            target_width, target_height = watermark_resized.size
+
         # Create a transparent layer for the watermark content
         # For 'standard', we paste the watermark here.
         # For others, we might need a mask.
@@ -166,6 +172,7 @@ def main():
     parser.add_argument("--resize-8mp", action="store_true", help="Resize output to approx 8 megapixels (maintain aspect ratio)")
     parser.add_argument("--mode", default="standard", choices=["standard", "difference", "negate"],
                         help="Watermark blending mode. 'standard' (overlay), 'difference' (color diff), or 'negate' (inversion).")
+    parser.add_argument("--angle", type=float, default=0, help="Rotation angle of the watermark in degrees.")
 
     args = parser.parse_args()
     
@@ -192,7 +199,7 @@ def main():
                 output_path = os.path.join(args.output_image, output_filename)
                 
                 print(f"Processing {filename} -> {output_filename}...")
-                if apply_watermark(input_path, args.watermark_image, output_path, args.position, args.size, max_pixels, args.mode):
+                if apply_watermark(input_path, args.watermark_image, output_path, args.position, args.size, max_pixels, args.mode, args.angle):
                     processed_count += 1
                 else:
                     print(f"Failed to process {filename}")
@@ -202,7 +209,7 @@ def main():
 
     else:
         # Single file processing
-        if apply_watermark(args.base_image, args.watermark_image, args.output_image, args.position, args.size, max_pixels, args.mode):
+        if apply_watermark(args.base_image, args.watermark_image, args.output_image, args.position, args.size, max_pixels, args.mode, args.angle):
             print(f"Successfully saved to {args.output_image}")
             sys.exit(0)
         else:
