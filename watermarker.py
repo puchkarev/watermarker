@@ -10,6 +10,9 @@ from PIL import Image
 sys.path.append(os.path.join(os.path.dirname(__file__), 'submodules', 'telegram'))
 import tele
 
+# Import core logic
+from watermarker_core import apply_watermark
+
 WATERMARKS_DIR = "watermarks"
 TEMP_DIR = "temp"
 SETTINGS_DIR = "settings"
@@ -69,83 +72,6 @@ def set_watermark(chat_id, url):
         print(f"Error setting watermark: {e}")
         return False
 
-def apply_watermark(base_image_path, watermark_path, output_path, settings):
-    try:
-        base = Image.open(base_image_path).convert("RGBA")
-        watermark = Image.open(watermark_path).convert("RGBA")
-
-        size_fraction = settings.get("size", 0.25)
-        position = settings.get("position", "bottom right")
-
-        # Calculate watermark size
-        target_width = int(base.width * size_fraction)
-        if target_width < 1: target_width = 1
-        aspect_ratio = watermark.height / watermark.width
-        target_height = int(target_width * aspect_ratio)
-        if target_height < 1: target_height = 1
-        
-        watermark_resized = watermark.resize((target_width, target_height), Image.Resampling.LANCZOS)
-        
-        # Create a transparent layer for the watermark
-        transparent = Image.new('RGBA', base.size, (0, 0, 0, 0))
-        
-        padding = int(base.width * 0.02)
-        
-        if position == "repeated":
-            # Tile the watermark
-            for y in range(0, base.height, target_height + padding):
-                for x in range(0, base.width, target_width + padding):
-                    transparent.paste(watermark_resized, (x, y))
-        else:
-            # Calculate coordinates
-            # Default to bottom right
-            x = base.width - target_width - padding
-            y = base.height - target_height - padding
-            
-            if position == "top left":
-                x = padding
-                y = padding
-            elif position == "top":
-                x = (base.width - target_width) // 2
-                y = padding
-            elif position == "top right":
-                x = base.width - target_width - padding
-                y = padding
-            elif position == "left":
-                x = padding
-                y = (base.height - target_height) // 2
-            elif position == "center":
-                x = (base.width - target_width) // 2
-                y = (base.height - target_height) // 2
-            elif position == "right":
-                x = base.width - target_width - padding
-                y = (base.height - target_height) // 2
-            elif position == "bottom left":
-                x = padding
-                y = base.height - target_height - padding
-            elif position == "bottom":
-                x = (base.width - target_width) // 2
-                y = base.height - target_height - padding
-            elif position == "bottom right":
-                x = base.width - target_width - padding
-                y = base.height - target_height - padding
-
-            transparent.paste(watermark_resized, (x, y))
-        
-        # Composite
-        result = Image.alpha_composite(base, transparent)
-        
-        # Save as original format if possible, but RGBA forces PNG usually. 
-        # If original was JPG, we might want to convert back to RGB.
-        if output_path.lower().endswith(".jpg") or output_path.lower().endswith(".jpeg"):
-            result = result.convert("RGB")
-        
-        result.save(output_path)
-        return True
-    except Exception as e:
-        print(f"Error applying watermark: {e}")
-        return False
-
 def process_text(bot_token, chat_id, text):
     text = text.strip()
     
@@ -179,14 +105,8 @@ def process_text(bot_token, chat_id, text):
             "repeated"
         ]
         
-        # Handle "top left" which is two words
-        # A simple split(maxsplit=1) puts the rest in parts[1].
-        # But if the user types "/position top left", parts[1] is "top left".
-        # This works fine.
-        
         if len(parts) == 2:
             pos = parts[1].lower().strip()
-            # Normalize spaces if needed, but strict matching is fine for now
             if pos in valid_positions:
                 settings = load_settings(chat_id)
                 settings["position"] = pos
@@ -228,7 +148,11 @@ def process_photo(bot_token, chat_id, photo_list):
             output_path = os.path.join(TEMP_DIR, f"watermarked_{filename}")
             
             settings = load_settings(chat_id)
-            if apply_watermark(local_path, watermark_path, output_path, settings):
+            # Unpack settings for the core function
+            position = settings.get("position", "bottom right")
+            size = settings.get("size", 0.25)
+            
+            if apply_watermark(local_path, watermark_path, output_path, position=position, size=size):
                 tele.send_telegram_file(bot_token, str(chat_id), output_path)
             else:
                 tele.send_telegram(bot_token, str(chat_id), "Error processing image.")
