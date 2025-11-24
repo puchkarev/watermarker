@@ -67,7 +67,10 @@ jobs:
              TAG_NAME="nightly-$(date +'%Y-%m-%d-%H%M')"
           fi
           
+          echo "Packaging application..."
+          zip -r watermarker-dist.zip . -x "*.git*" "*.github*" "__pycache__*" "venv*" "tests*" "settings*" "temp*" "watermarks*"
+          
           echo "Creating release $TAG_NAME"
           
-          gh release create "$TAG_NAME" --title "Nightly Release $TAG_NAME" --generate-notes --prerelease
+          gh release create "$TAG_NAME" watermarker-dist.zip --title "Nightly Release $TAG_NAME" --generate-notes --prerelease
         fi
