@@ -1,5 +1,7 @@
 # Watermarker Bot
 
+[![CI](https://github.com/puchkarev/watermarker/actions/workflows/ci.yml/badge.svg)](https://github.com/puchkarev/watermarker/actions/workflows/ci.yml)
+
 A Telegram bot service that adds watermarks to images.
 
 ## Features
