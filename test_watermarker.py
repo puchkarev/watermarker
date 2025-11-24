@@ -219,6 +219,7 @@ class TestWatermarker(unittest.TestCase):
             watermarker.process_text("token", chat_id, "/start")
             mock_reset.assert_called_with(chat_id)
             self.assertIn("Welcome to Watermarker Bot!", mock_send.call_args[0][2])
+            self.assertIn("GitHub Repo: https://github.com/puchkarev/watermarker", mock_send.call_args[0][2])
         mock_send.reset_mock() # Clear calls after /start
 
         # Test Settings (after /start which resets to default)
