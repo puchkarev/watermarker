@@ -1,8 +1,9 @@
 import argparse
 import sys
+import os
 from PIL import Image
 
-def apply_watermark(base_image_path, watermark_path, output_path, position="bottom right", size=0.25):
+def apply_watermark(base_image_path, watermark_path, output_path, position="bottom right", size=0.25, max_pixels=None):
     """
     Applies a watermark to an image.
     
@@ -14,12 +15,26 @@ def apply_watermark(base_image_path, watermark_path, output_path, position="bott
                         Options: 'top left', 'top', 'top right', 'left', 'center', 'right', 
                                  'bottom left', 'bottom', 'bottom right', 'repeated'.
         size (float): Size of the watermark as a fraction of the base image width (0.0 - 1.0).
+        max_pixels (int): Maximum number of pixels for the output image. If input is larger, it will be resized.
     
     Returns:
         bool: True if successful, False otherwise.
     """
     try:
         base = Image.open(base_image_path).convert("RGBA")
+        
+        # Resize if max_pixels is set and image is larger
+        if max_pixels:
+            current_pixels = base.width * base.height
+            if current_pixels > max_pixels:
+                ratio = (max_pixels / current_pixels) ** 0.5
+                new_width = int(base.width * ratio)
+                new_height = int(base.height * ratio)
+                # Ensure at least 1 pixel
+                new_width = max(1, new_width)
+                new_height = max(1, new_height)
+                base = base.resize((new_width, new_height), Image.Resampling.LANCZOS)
+
         watermark = Image.open(watermark_path).convert("RGBA")
 
         # Calculate watermark size
@@ -80,7 +95,10 @@ def apply_watermark(base_image_path, watermark_path, output_path, position="bott
         # Composite
         result = Image.alpha_composite(base, transparent)
         
-        # Save as original format if possible
+        # Save logic
+        # If output path implies a specific format, use it.
+        # But if we want to ensure webp in batch mode, the extension is already set in output_path.
+        
         if output_path.lower().endswith(".jpg") or output_path.lower().endswith(".jpeg"):
             result = result.convert("RGB")
         
@@ -92,23 +110,57 @@ def apply_watermark(base_image_path, watermark_path, output_path, position="bott
 
 def main():
     parser = argparse.ArgumentParser(description="Apply a watermark to an image.")
-    parser.add_argument("base_image", help="Path to the source image")
+    parser.add_argument("base_image", help="Path to the source image or directory")
     parser.add_argument("watermark_image", help="Path to the watermark image")
-    parser.add_argument("output_image", help="Path to save the watermarked image")
+    parser.add_argument("output_image", help="Path to save the watermarked image or output directory")
     parser.add_argument("--position", default="bottom right", 
                         choices=['top left', 'top', 'top right', 'left', 'center', 'right', 
                                  'bottom left', 'bottom', 'bottom right', 'repeated'],
                         help="Position of the watermark")
     parser.add_argument("--size", type=float, default=0.25, help="Size fraction (0.0 - 1.0)")
+    parser.add_argument("--resize-8mp", action="store_true", help="Resize output to approx 8 megapixels (maintain aspect ratio)")
 
     args = parser.parse_args()
+    
+    max_pixels = 8000000 if args.resize_8mp else None
 
-    if apply_watermark(args.base_image, args.watermark_image, args.output_image, args.position, args.size):
-        print(f"Successfully saved to {args.output_image}")
+    if os.path.isdir(args.base_image):
+        # Batch processing
+        if not os.path.exists(args.output_image):
+            try:
+                os.makedirs(args.output_image)
+            except OSError as e:
+                print(f"Error creating output directory: {e}")
+                sys.exit(1)
+                
+        supported_exts = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tiff"}
+        processed_count = 0
+        
+        for filename in os.listdir(args.base_image):
+            ext = os.path.splitext(filename)[1].lower()
+            if ext in supported_exts:
+                input_path = os.path.join(args.base_image, filename)
+                # Feature: Change encoding to webp for batch processing
+                output_filename = os.path.splitext(filename)[0] + ".webp"
+                output_path = os.path.join(args.output_image, output_filename)
+                
+                print(f"Processing {filename} -> {output_filename}...")
+                if apply_watermark(input_path, args.watermark_image, output_path, args.position, args.size, max_pixels):
+                    processed_count += 1
+                else:
+                    print(f"Failed to process {filename}")
+        
+        print(f"Batch processing complete. {processed_count} images processed.")
         sys.exit(0)
+
     else:
-        print("Failed to apply watermark")
-        sys.exit(1)
+        # Single file processing
+        if apply_watermark(args.base_image, args.watermark_image, args.output_image, args.position, args.size, max_pixels):
+            print(f"Successfully saved to {args.output_image}")
+            sys.exit(0)
+        else:
+            print("Failed to apply watermark")
+            sys.exit(1)
 
 if __name__ == "__main__":
     main()
