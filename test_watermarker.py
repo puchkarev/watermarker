@@ -3,6 +3,7 @@ from unittest.mock import MagicMock, patch
 import sys
 import os
 import shutil
+import json
 from PIL import Image
 from io import BytesIO
 
@@ -18,6 +19,7 @@ class TestWatermarker(unittest.TestCase):
             os.makedirs(self.test_dir)
         watermarker.WATERMARKS_DIR = os.path.join(self.test_dir, "watermarks")
         watermarker.TEMP_DIR = os.path.join(self.test_dir, "temp")
+        watermarker.SETTINGS_DIR = os.path.join(self.test_dir, "settings")
         watermarker.ensure_dirs()
 
     def tearDown(self):
@@ -50,7 +52,19 @@ class TestWatermarker(unittest.TestCase):
         result = watermarker.set_watermark(123, "http://bad.url")
         self.assertFalse(result)
 
-    def test_apply_watermark(self):
+    def test_settings_persistence(self):
+        chat_id = "test_chat"
+        defaults = watermarker.load_settings(chat_id)
+        self.assertEqual(defaults["position"], "bottom right")
+        
+        new_settings = {"position": "top left", "size": 0.5}
+        watermarker.save_settings(chat_id, new_settings)
+        
+        loaded = watermarker.load_settings(chat_id)
+        self.assertEqual(loaded["position"], "top left")
+        self.assertEqual(loaded["size"], 0.5)
+
+    def test_apply_watermark_default(self):
         # Create base image
         base_path = os.path.join(watermarker.TEMP_DIR, "base.png")
         base_img = Image.new('RGB', (800, 600), color='white')
@@ -62,31 +76,54 @@ class TestWatermarker(unittest.TestCase):
         watermark_img.save(watermark_path)
 
         output_path = os.path.join(watermarker.TEMP_DIR, "output.png")
+        settings = {"position": "bottom right", "size": 0.25}
         
-        result = watermarker.apply_watermark(base_path, watermark_path, output_path)
+        result = watermarker.apply_watermark(base_path, watermark_path, output_path, settings)
         self.assertTrue(result)
         self.assertTrue(os.path.exists(output_path))
         
-        # Verify result dimensions
         out_img = Image.open(output_path)
         self.assertEqual(out_img.size, (800, 600))
-        # We can't easily check pixels without precise coordinates, but we know it shouldn't crash
 
-    @patch('watermarker.tele.send_telegram')
-    @patch('watermarker.set_watermark')
-    def test_process_text_source(self, mock_set_watermark, mock_send):
-        mock_set_watermark.return_value = True
-        watermarker.process_text("token", 123, "/source http://img.com")
+    def test_apply_watermark_repeated(self):
+        base_path = os.path.join(watermarker.TEMP_DIR, "base_tiled.png")
+        base_img = Image.new('RGB', (500, 500), color='white')
+        base_img.save(base_path)
+
+        watermark_path = os.path.join(watermarker.WATERMARKS_DIR, "tiler.png")
+        watermark_img = Image.new('RGBA', (50, 50), color='blue')
+        watermark_img.save(watermark_path)
+
+        output_path = os.path.join(watermarker.TEMP_DIR, "output_tiled.png")
+        settings = {"position": "repeated", "size": 0.1} # 50px width
         
-        mock_set_watermark.assert_called_with(123, "http://img.com")
-        mock_send.assert_called()
-        self.assertIn("successfully", mock_send.call_args[0][2])
+        result = watermarker.apply_watermark(base_path, watermark_path, output_path, settings)
+        self.assertTrue(result)
 
     @patch('watermarker.tele.send_telegram')
-    def test_process_text_invalid(self, mock_send):
-        watermarker.process_text("token", 123, "/source")
+    def test_process_text_commands(self, mock_send):
+        chat_id = 123
+        
+        # Test Help
+        watermarker.process_text("token", chat_id, "/help")
         mock_send.assert_called()
-        self.assertIn("Usage", mock_send.call_args[0][2])
+        self.assertIn("Available commands", mock_send.call_args[0][2])
+        
+        # Test Position Success
+        watermarker.process_text("token", chat_id, "/position top left")
+        self.assertIn("Position set to: top left", mock_send.call_args[0][2])
+        
+        # Test Position Invalid
+        watermarker.process_text("token", chat_id, "/position invalid")
+        self.assertIn("Invalid position", mock_send.call_args[0][2])
+        
+        # Test Size Success
+        watermarker.process_text("token", chat_id, "/size 0.5")
+        self.assertIn("Size set to: 0.5", mock_send.call_args[0][2])
+        
+        # Test Size Invalid
+        watermarker.process_text("token", chat_id, "/size 1.5")
+        self.assertIn("Size must be between", mock_send.call_args[0][2])
 
     @patch('watermarker.tele.send_telegram_file')
     @patch('watermarker.tele.get_telegram_file')
@@ -109,6 +146,8 @@ class TestWatermarker(unittest.TestCase):
         
         mock_get_file.assert_called()
         mock_apply.assert_called()
+        # Verify apply was called with settings (dict) as last arg
+        self.assertIsInstance(mock_apply.call_args[0][3], dict)
         mock_send_file.assert_called()
 
 if __name__ == '__main__':
