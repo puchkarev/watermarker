@@ -102,7 +102,10 @@ else
 fi
 
 LATEST_RELEASE_URL="https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/releases/latest"
-RESPONSE=$(curl -s -H "$AUTH_HEADER" "$LATEST_RELEASE_URL")
+if ! RESPONSE=$(curl -sS -H "$AUTH_HEADER" "$LATEST_RELEASE_URL"); then
+    echo "Error: Failed to fetch release info from GitHub."
+    exit 1
+fi
 
 # Check for errors
 if echo "$RESPONSE" | grep -q "Not Found"; then
