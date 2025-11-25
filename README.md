@@ -4,6 +4,8 @@
 
 A Telegram bot service that adds watermarks to images.
 
+The bot runs here [bot](https://t.me/add_sun_watermark_bot)
+
 ## Features
 
 -   **Set Watermark**: Use `/source <url>` to set a watermark image for the current chat.
