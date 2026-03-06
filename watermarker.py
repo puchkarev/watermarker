@@ -2,6 +2,8 @@ import sys
 import os
 import json
 import time
+import ipaddress
+from urllib.parse import urlparse
 import requests
 import zipfile
 import shutil
@@ -69,15 +71,38 @@ def _reset_settings(chat_id):
 def get_watermark_path(chat_id):
     return os.path.join(WATERMARKS_DIR, f"{chat_id}.png")
 
+def _is_safe_url(url):
+    """Check that a URL doesn't point to internal/private network addresses."""
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            return False
+        hostname = parsed.hostname
+        if not hostname:
+            return False
+        import socket
+        resolved = socket.getaddrinfo(hostname, None)
+        for _, _, _, _, sockaddr in resolved:
+            ip = ipaddress.ip_address(sockaddr[0])
+            if ip.is_private or ip.is_loopback or ip.is_reserved or ip.is_link_local:
+                return False
+        return True
+    except Exception:
+        return False
+
 def set_watermark(chat_id, url):
     try:
-        response = requests.get(url, stream=True)
+        if not _is_safe_url(url):
+            print(f"Blocked unsafe URL: {url}")
+            return False
+
+        response = requests.get(url, stream=True, timeout=15)
         response.raise_for_status()
-        
+
         # Verify it's an image
         img = Image.open(BytesIO(response.content))
         img.verify()
-        
+
         # Save it
         # Re-open to save (verify consumes the stream/file)
         img = Image.open(BytesIO(response.content))
@@ -100,7 +125,7 @@ def process_text(bot_token, chat_id, text):
         "/settings - Show your current watermark settings.\n"
         "/source <url> - Set the watermark image for this chat. Supports direct image URLs (PNG, JPG, etc.).\n"
         "/position <pos> - Set watermark position. Options: top left, top, top right, left, center, right, bottom left, bottom, bottom right, repeated.\n"
-        "/size <fraction> - Set watermark size as fraction of watermark's original width (e.1 for 10%, 0.5 for 50%).\n"
+        "/size <fraction> - Set watermark size as fraction of watermark's original width (0.1 for 10%, 0.5 for 50%).\n"
         "/strength <fraction> - Set watermark opacity (0.0 - 1.0). Default: 0.2.\n"
         "/angle <degrees> - Set watermark rotation angle in degrees (0-360). Default: 45.\n"
         "/mode <mode> - Set watermark blending mode. Options: standard, difference, negate. Default: negate.\n"
@@ -158,13 +183,13 @@ def process_text(bot_token, chat_id, text):
         if len(parts) == 2:
             try:
                 size_val = float(parts[1])
-                if 0.0 < size_val <= 1.0:
+                if 0.0 < size_val <= 10.0:
                     settings = load_settings(chat_id)
                     settings["size"] = size_val
                     save_settings(chat_id, settings)
                     tele.send_telegram(bot_token, str(chat_id), f"Size set to: {size_val}")
                 else:
-                    tele.send_telegram(bot_token, str(chat_id), "Size must be between 0.0 and 1.0")
+                    tele.send_telegram(bot_token, str(chat_id), "Size must be between 0.0 and 10.0")
             except ValueError:
                 tele.send_telegram(bot_token, str(chat_id), "Invalid number format.")
         else:
@@ -256,6 +281,11 @@ def process_document(bot_token, chat_id, document):
             os.makedirs(processed_dir, exist_ok=True)
 
             with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                # Protect against zip-slip: reject entries with absolute paths or '..'
+                for member in zip_ref.namelist():
+                    member_path = os.path.realpath(os.path.join(extract_dir, member))
+                    if not member_path.startswith(os.path.realpath(extract_dir) + os.sep) and member_path != os.path.realpath(extract_dir):
+                        raise ValueError(f"Zip entry with unsafe path: {member}")
                 zip_ref.extractall(extract_dir)
             
             # Get settings
