@@ -210,4 +210,5 @@ __marimo__/
 config.json
 watermarks/
 temp/
-=======
+settings/
+test_data/
