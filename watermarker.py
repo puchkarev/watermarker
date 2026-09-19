@@ -45,7 +45,9 @@ def load_settings(chat_id):
         "angle": 45,
         "mode": "negate",
         "strength": 0.2,
-        "resize_8mp": True
+        "resize_8mp": True,
+        "x_offset": 3.0,
+        "y_offset": 3.0
     }
     if os.path.exists(path):
         try:
@@ -345,6 +347,8 @@ def process_document(bot_token, chat_id, document):
             angle = settings.get("angle", 45)
             mode = settings.get("mode", "negate")
             resize_8mp = settings.get("resize_8mp", True)
+            x_offset = settings.get("x_offset", 3.0)
+            y_offset = settings.get("y_offset", 3.0)
             max_pixels = 8000000 if resize_8mp else None
 
             # Process files
@@ -368,7 +372,8 @@ def process_document(bot_token, chat_id, document):
                         
                         if apply_watermark(input_path, watermark_path, output_path, 
                                            position=position, size=size, strength=strength,
-                                           angle=angle, mode=mode, max_pixels=max_pixels):
+                                           angle=angle, mode=mode, max_pixels=max_pixels,
+                                           x_offset=x_offset, y_offset=y_offset):
                             processed_count += 1
                         else:
                             failed.append(rel_path)
@@ -427,9 +432,11 @@ def process_photo(bot_token, chat_id, photo_list):
             angle = settings.get("angle", 45)
             mode = settings.get("mode", "negate")
             resize_8mp = settings.get("resize_8mp", True)
+            x_offset = settings.get("x_offset", 3.0)
+            y_offset = settings.get("y_offset", 3.0)
             max_pixels = 8000000 if resize_8mp else None
             
-            if apply_watermark(local_path, watermark_path, output_path, position=position, size=size, strength=strength, angle=angle, mode=mode, max_pixels=max_pixels):
+            if apply_watermark(local_path, watermark_path, output_path, position=position, size=size, strength=strength, angle=angle, mode=mode, max_pixels=max_pixels, x_offset=x_offset, y_offset=y_offset):
                 tele.send_telegram_file(bot_token, str(chat_id), output_path)
             else:
                 tele.send_telegram(bot_token, str(chat_id), "Error processing image.")

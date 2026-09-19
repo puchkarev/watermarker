@@ -135,7 +135,8 @@ class TestWatermarker(unittest.TestCase):
 
         output_path = os.path.join(watermarker.TEMP_DIR, "output.png")
 
-        result = watermarker.apply_watermark(base_path, watermark_path, output_path, position="top left", size=0.5)
+        result = watermarker.apply_watermark(base_path, watermark_path, output_path, position="top left", size=0.5,
+                                             x_offset=1.2, y_offset=1.2)
         self.assertTrue(result)
         self.assertTrue(os.path.exists(output_path))
 
@@ -196,7 +197,9 @@ class TestWatermarker(unittest.TestCase):
 
         output_path = os.path.join(watermarker.TEMP_DIR, "output_offset.png")
 
-        result = watermarker.apply_watermark(base_path, watermark_path, output_path, position="repeated", size=1.0)
+        # 50px tiles with a 4px gap
+        result = watermarker.apply_watermark(base_path, watermark_path, output_path, position="repeated", size=1.0,
+                                             x_offset=1.08, y_offset=1.08)
 
         self.assertTrue(result)
         out_img = Image.open(output_path).convert("RGBA")
@@ -206,6 +209,43 @@ class TestWatermarker(unittest.TestCase):
 
         pixel_in_gap = out_img.getpixel((79, 60))
         self.assertEqual(pixel_in_gap, (255, 255, 255, 255))
+
+    def test_apply_watermark_repeated_spacing(self):
+        base_path = os.path.join(watermarker.TEMP_DIR, "base_spacing.png")
+        Image.new('RGB', (200, 200), color='white').save(base_path)
+        watermark_path = os.path.join(watermarker.WATERMARKS_DIR, "black_tile.png")
+        Image.new('RGBA', (50, 50), color='black').save(watermark_path)
+        output_path = os.path.join(watermarker.TEMP_DIR, "output_spacing.png")
+
+        # Offset 3.0 leaves a gap of twice the tile size: tiles every 150px,
+        # odd rows shifted by half a step (75px)
+        result = watermarker.apply_watermark(base_path, watermark_path, output_path, position="repeated", size=1.0,
+                                             x_offset=3.0, y_offset=3.0)
+        self.assertTrue(result)
+        out_img = Image.open(output_path).convert("RGBA")
+
+        black, white = (0, 0, 0, 255), (255, 255, 255, 255)
+        self.assertEqual(out_img.getpixel((25, 25)), black)    # first tile
+        self.assertEqual(out_img.getpixel((175, 25)), black)   # next tile in row
+        self.assertEqual(out_img.getpixel((100, 25)), white)   # horizontal gap
+        self.assertEqual(out_img.getpixel((25, 100)), white)   # vertical gap
+        self.assertEqual(out_img.getpixel((100, 175)), black)  # shifted second row
+        self.assertEqual(out_img.getpixel((25, 175)), white)
+
+    def test_apply_watermark_position_offset(self):
+        base_path = os.path.join(watermarker.TEMP_DIR, "base_pos.png")
+        Image.new('RGB', (400, 400), color='white').save(base_path)
+        watermark_path = os.path.join(watermarker.WATERMARKS_DIR, "black_tile.png")
+        Image.new('RGBA', (50, 50), color='black').save(watermark_path)
+        output_path = os.path.join(watermarker.TEMP_DIR, "output_pos.png")
+
+        # Offset 3.0 puts the watermark two tile-widths in from the edge: 250..300
+        result = watermarker.apply_watermark(base_path, watermark_path, output_path, position="bottom right", size=1.0,
+                                             x_offset=3.0, y_offset=3.0)
+        self.assertTrue(result)
+        out_img = Image.open(output_path).convert("RGBA")
+        self.assertEqual(out_img.getpixel((275, 275)), (0, 0, 0, 255))
+        self.assertEqual(out_img.getpixel((375, 375)), (255, 255, 255, 255))
 
     def test_apply_watermark_resize(self):
         base_path = os.path.join(watermarker.TEMP_DIR, "base_large.png")
@@ -502,6 +542,8 @@ class TestWatermarker(unittest.TestCase):
         self.assertIn("angle", mock_apply.call_args[1])
         self.assertIn("mode", mock_apply.call_args[1])
         self.assertIn("max_pixels", mock_apply.call_args[1])
+        self.assertEqual(mock_apply.call_args[1]["x_offset"], 3.0)
+        self.assertEqual(mock_apply.call_args[1]["y_offset"], 3.0)
 
         mock_send_file.assert_called()
 
