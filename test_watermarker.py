@@ -5,6 +5,7 @@ import os
 import shutil
 import json
 import zipfile
+import errno
 from PIL import Image
 from io import BytesIO
 
@@ -476,14 +477,14 @@ class TestWatermarker(unittest.TestCase):
     # --- Photo processing tests ---
 
     @patch('watermarker.tele.send_telegram_file')
-    @patch('watermarker.tele.get_telegram_file')
+    @patch('watermarker._download_file')
     @patch('watermarker.apply_watermark')
     def test_process_photo(self, mock_apply, mock_get_file, mock_send_file):
         watermark_path = watermarker.get_watermark_path(123)
         with open(watermark_path, 'w') as f:
             f.write("dummy")
 
-        mock_get_file.return_value = "photo.jpg"
+        mock_get_file.return_value = os.path.join(watermarker.TEMP_DIR, "photo.jpg")
         mock_apply.return_value = True
 
         with open(os.path.join(watermarker.TEMP_DIR, "photo.jpg"), 'w') as f:
@@ -514,7 +515,7 @@ class TestWatermarker(unittest.TestCase):
         self.assertIn("No watermark set", msg)
 
     @patch('watermarker.tele.send_telegram_file')
-    @patch('watermarker.tele.get_telegram_file')
+    @patch('watermarker._download_file')
     @patch('watermarker.tele.send_telegram')
     @patch('watermarker.apply_watermark')
     def test_process_photo_apply_fails(self, mock_apply, mock_send, mock_get_file, mock_send_file):
@@ -522,7 +523,7 @@ class TestWatermarker(unittest.TestCase):
         with open(watermark_path, 'w') as f:
             f.write("dummy")
 
-        mock_get_file.return_value = "photo.jpg"
+        mock_get_file.return_value = os.path.join(watermarker.TEMP_DIR, "photo.jpg")
         mock_apply.return_value = False
 
         with open(os.path.join(watermarker.TEMP_DIR, "photo.jpg"), 'w') as f:
@@ -537,8 +538,8 @@ class TestWatermarker(unittest.TestCase):
 
     # --- Document/zip processing tests ---
 
-    @patch('watermarker.tele.send_telegram_file')
-    @patch('watermarker.tele.get_telegram_file')
+    @patch('watermarker._send_document')
+    @patch('watermarker._download_file')
     @patch('watermarker.apply_watermark')
     @patch('zipfile.ZipFile')
     @patch('shutil.make_archive')
@@ -546,7 +547,7 @@ class TestWatermarker(unittest.TestCase):
         chat_id = 123
         doc = {"file_id": "zip_id", "file_name": "images.zip", "mime_type": "application/zip"}
 
-        mock_get_file.return_value = "images.zip"
+        mock_get_file.return_value = os.path.join(watermarker.TEMP_DIR, "1234.zip")
 
         def extract_side_effect(path):
             os.makedirs(path, exist_ok=True)
@@ -567,11 +568,13 @@ class TestWatermarker(unittest.TestCase):
         mock_apply.assert_called()
         mock_make_archive.assert_called()
         mock_send_file.assert_called()
+        # Result is sent back under the original file name
+        self.assertEqual(mock_send_file.call_args[0][3], "images.zip")
 
     # --- Zip-slip protection test ---
 
-    @patch('watermarker.tele.send_telegram_file')
-    @patch('watermarker.tele.get_telegram_file')
+    @patch('watermarker._send_document')
+    @patch('watermarker._download_file')
     @patch('watermarker.tele.send_telegram')
     def test_process_document_zip_slip_blocked(self, mock_send, mock_get_file, mock_send_file):
         chat_id = 999
@@ -582,7 +585,7 @@ class TestWatermarker(unittest.TestCase):
         with zipfile.ZipFile(zip_path, 'w') as zf:
             zf.writestr("../../etc/passwd", "evil content")
 
-        mock_get_file.return_value = "evil.zip"
+        mock_get_file.return_value = zip_path
 
         watermarker.process_document("token", chat_id, doc)
 
@@ -616,6 +619,120 @@ class TestWatermarker(unittest.TestCase):
     def test_handle_update_no_message(self):
         # Should not crash
         watermarker.handle_update("token", {"update_id": 1})
+
+    # --- Zip naming and error reporting tests ---
+
+    def _make_zip(self, name, entries):
+        zip_path = os.path.join(watermarker.TEMP_DIR, name)
+        with zipfile.ZipFile(zip_path, 'w') as zf:
+            for entry_name, data in entries.items():
+                zf.writestr(entry_name, data)
+        return zip_path
+
+    def _image_bytes(self):
+        buf = BytesIO()
+        Image.new('RGB', (64, 64), color='blue').save(buf, format='PNG')
+        return buf.getvalue()
+
+    @patch('watermarker.tele.send_telegram')
+    @patch('watermarker._send_document')
+    @patch('watermarker._download_file')
+    def test_process_document_zip_keeps_original_name(self, mock_download, mock_send_doc, mock_send):
+        mock_download.return_value = self._make_zip("1234.zip", {"a.png": self._image_bytes()})
+        sent = {}
+
+        def capture(bot_token, chat_id, path, file_name, caption=""):
+            with zipfile.ZipFile(path) as zf:
+                sent["entries"] = zf.namelist()
+            sent["name"] = file_name
+
+        mock_send_doc.side_effect = capture
+        doc = {"file_id": "zip_id", "file_name": "My Photos 2026.zip", "mime_type": "application/zip"}
+        watermarker.process_document("token", 123, doc)
+
+        self.assertEqual(sent["name"], "My Photos 2026.zip")
+        self.assertEqual(sent["entries"], ["a.webp"])
+        # Temp files cleaned up
+        self.assertEqual(os.listdir(watermarker.TEMP_DIR), [])
+
+    @patch('watermarker.tele.send_telegram')
+    @patch('watermarker._send_document')
+    @patch('watermarker._download_file')
+    def test_process_document_out_of_storage_reported(self, mock_download, mock_send_doc, mock_send):
+        mock_download.side_effect = OSError(errno.ENOSPC, "No space left on device")
+        doc = {"file_id": "zip_id", "file_name": "big.zip", "mime_type": "application/zip"}
+        watermarker.process_document("token", 123, doc)
+
+        msg = mock_send.call_args[0][2]
+        self.assertIn("Error processing zip", msg)
+        self.assertIn("out of storage", msg)
+        mock_send_doc.assert_not_called()
+
+    @patch('watermarker.tele.send_telegram')
+    @patch('watermarker._send_document')
+    @patch('watermarker._download_file')
+    def test_process_document_upload_failure_reported(self, mock_download, mock_send_doc, mock_send):
+        mock_download.return_value = self._make_zip("1234.zip", {"a.png": self._image_bytes()})
+        mock_send_doc.side_effect = RuntimeError("Telegram refused the upload: Request Entity Too Large")
+        doc = {"file_id": "zip_id", "file_name": "big.zip", "mime_type": "application/zip"}
+        watermarker.process_document("token", 123, doc)
+
+        msg = mock_send.call_args[0][2]
+        self.assertIn("Request Entity Too Large", msg)
+        self.assertEqual(os.listdir(watermarker.TEMP_DIR), [])
+
+    @patch('watermarker.tele.send_telegram')
+    @patch('watermarker._send_document')
+    @patch('watermarker._download_file')
+    def test_process_document_partial_failure_reported(self, mock_download, mock_send_doc, mock_send):
+        mock_download.return_value = self._make_zip("1234.zip", {
+            "good.png": self._image_bytes(),
+            "broken.jpg": b"not an image",
+        })
+        doc = {"file_id": "zip_id", "file_name": "mixed.zip", "mime_type": "application/zip"}
+        watermarker.process_document("token", 123, doc)
+
+        mock_send_doc.assert_called()
+        self.assertIn("1 failed", mock_send_doc.call_args[0][4])
+        msg = mock_send.call_args[0][2]
+        self.assertIn("broken.jpg", msg)
+
+    @patch('watermarker.tele.send_telegram')
+    @patch('watermarker._download_file')
+    def test_process_photo_download_failure_reported(self, mock_download, mock_send):
+        with open(watermarker.get_watermark_path(123), 'wb') as f:
+            f.write(self._image_bytes())
+        mock_download.side_effect = RuntimeError("Telegram refused the download: file is too big")
+        watermarker.process_photo("token", 123, [{"file_id": "fid"}])
+
+        msg = mock_send.call_args[0][2]
+        self.assertIn("file is too big", msg)
+
+    @patch('watermarker.tele.send_telegram')
+    @patch('watermarker.process_text', side_effect=RuntimeError("boom"))
+    def test_handle_update_reports_unexpected_error(self, mock_process, mock_send):
+        update = {"message": {"chat": {"id": 1}, "text": "/help"}}
+        watermarker.handle_update("token", update)
+        msg = mock_send.call_args[0][2]
+        self.assertIn("boom", msg)
+
+    @patch('watermarker.requests.get')
+    def test_download_file_raises_with_telegram_reason(self, mock_get):
+        mock_get.return_value.json.return_value = {"ok": False, "description": "Bad Request: file is too big"}
+        with self.assertRaises(RuntimeError) as ctx:
+            watermarker._download_file("token", "fid")
+        self.assertIn("file is too big", str(ctx.exception))
+
+    @patch('watermarker.requests.post')
+    def test_send_document_raises_on_telegram_error(self, mock_post):
+        path = os.path.join(watermarker.TEMP_DIR, "x.zip")
+        with open(path, 'wb') as f:
+            f.write(b"data")
+        mock_post.return_value.json.return_value = {"ok": False, "description": "Request Entity Too Large"}
+        with self.assertRaises(RuntimeError) as ctx:
+            watermarker._send_document("token", 1, path, "orig.zip")
+        self.assertIn("Request Entity Too Large", str(ctx.exception))
+        self.assertEqual(mock_post.call_args[1]["files"]["document"][0], "orig.zip")
 
 if __name__ == '__main__':
     unittest.main()
