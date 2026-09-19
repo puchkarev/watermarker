@@ -1,5 +1,6 @@
 import sys
 import os
+import errno
 import json
 import time
 import ipaddress
@@ -70,6 +71,42 @@ def _reset_settings(chat_id):
 
 def get_watermark_path(chat_id):
     return os.path.join(WATERMARKS_DIR, f"{chat_id}.png")
+
+def _describe_error(e):
+    """Turn an exception into a message suitable for sending back to the user."""
+    if isinstance(e, OSError) and e.errno == errno.ENOSPC:
+        return "the server is out of storage space"
+    return f"{type(e).__name__}: {e}"
+
+def _download_file(bot_token, file_id):
+    """Download a Telegram file into TEMP_DIR and return its local path. Raises on failure."""
+    response = requests.get(f"https://api.telegram.org/bot{bot_token}/getFile",
+                            params={"file_id": file_id}, timeout=30).json()
+    if not response.get("ok"):
+        raise RuntimeError(f"Telegram refused the download: {response.get('description', 'unknown error')}")
+
+    file_path = response["result"]["file_path"]
+    local_path = os.path.join(TEMP_DIR, f"{int(time.time() * 1000)}{os.path.splitext(file_path)[1]}")
+    with requests.get(f"https://api.telegram.org/file/bot{bot_token}/{file_path}", stream=True, timeout=300) as r:
+        r.raise_for_status()
+        try:
+            with open(local_path, "wb") as f:
+                for chunk in r.iter_content(chunk_size=1 << 20):
+                    f.write(chunk)
+        except Exception:
+            if os.path.exists(local_path):
+                os.remove(local_path)
+            raise
+    return local_path
+
+def _send_document(bot_token, chat_id, path, file_name, caption=""):
+    """Upload a file as a document under the given name. Raises on failure."""
+    with open(path, "rb") as f:
+        response = requests.post(f"https://api.telegram.org/bot{bot_token}/sendDocument",
+                                 data={"chat_id": str(chat_id), "caption": caption},
+                                 files={"document": (file_name, f)}, timeout=600).json()
+    if not response.get("ok"):
+        raise RuntimeError(f"Telegram refused the upload: {response.get('description', 'unknown error')}")
 
 def _is_safe_url(url):
     """Check that a URL doesn't point to internal/private network addresses."""
@@ -265,18 +302,22 @@ def process_document(bot_token, chat_id, document):
     
     if mime_type == "application/zip" or file_name.lower().endswith(".zip"):
         tele.send_telegram(bot_token, str(chat_id), "Processing zip file... this may take a moment.")
-        
-        # Download zip
-        zip_filename = tele.get_telegram_file(bot_token, str(chat_id), file_id, TEMP_DIR)
-        if not zip_filename:
-            return
 
-        zip_path = os.path.join(TEMP_DIR, zip_filename)
-        extract_dir = os.path.join(TEMP_DIR, f"extract_{zip_filename}")
-        processed_dir = os.path.join(TEMP_DIR, f"processed_{zip_filename}")
-        result_zip_path = os.path.join(TEMP_DIR, f"watermarked_{zip_filename}")
+        # Reply with the same name the user sent
+        result_name = os.path.basename(file_name) or "watermarked.zip"
+        if not result_name.lower().endswith(".zip"):
+            result_name += ".zip"
+
+        zip_path = None
+        extract_dir = processed_dir = result_zip_path = None
 
         try:
+            zip_path = _download_file(bot_token, file_id)
+            zip_filename = os.path.basename(zip_path)
+            extract_dir = os.path.join(TEMP_DIR, f"extract_{zip_filename}")
+            processed_dir = os.path.join(TEMP_DIR, f"processed_{zip_filename}")
+            result_zip_path = os.path.join(TEMP_DIR, f"watermarked_{zip_filename}")
+
             os.makedirs(extract_dir, exist_ok=True)
             os.makedirs(processed_dir, exist_ok=True)
 
@@ -309,6 +350,7 @@ def process_document(bot_token, chat_id, document):
             # Process files
             supported_exts = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tiff"}
             processed_count = 0
+            failed = []
             
             for root, dirs, files in os.walk(extract_dir):
                 for filename in files:
@@ -316,13 +358,8 @@ def process_document(bot_token, chat_id, document):
                     if ext in supported_exts:
                         input_path = os.path.join(root, filename)
                         
-                        # Calculate relative path to maintain structure if needed, 
-                        # but usually flattening or keeping structure is choice.
-                        # Let's flatten for simplicity in processed_dir or match structure?
-                        # Matching structure is safer for "unzip, process, zip".
-                        
+                        # Keep the zip's folder structure, with each image converted to webp
                         rel_path = os.path.relpath(input_path, extract_dir)
-                        # Change ext to webp
                         rel_path_webp = os.path.splitext(rel_path)[0] + ".webp"
                         output_path = os.path.join(processed_dir, rel_path_webp)
                         
@@ -333,25 +370,37 @@ def process_document(bot_token, chat_id, document):
                                            position=position, size=size, strength=strength,
                                            angle=angle, mode=mode, max_pixels=max_pixels):
                             processed_count += 1
+                        else:
+                            failed.append(rel_path)
 
             if processed_count > 0:
                 # Zip result
                 shutil.make_archive(os.path.splitext(result_zip_path)[0], 'zip', processed_dir)
-                
-                # Send result
-                tele.send_telegram_file(bot_token, str(chat_id), result_zip_path)
+
+                # Send result under the original name
+                caption = f"Watermarked {processed_count} image(s)."
+                if failed:
+                    caption += f" {len(failed)} failed."
+                _send_document(bot_token, chat_id, result_zip_path, result_name, caption)
+
+                if failed:
+                    tele.send_telegram(bot_token, str(chat_id),
+                                       f"Could not process {len(failed)} image(s):\n" + "\n".join(failed))
+            elif failed:
+                tele.send_telegram(bot_token, str(chat_id),
+                                   f"All {len(failed)} image(s) in the zip failed to process:\n" + "\n".join(failed))
             else:
-                tele.send_telegram(bot_token, str(chat_id), "No images found or processed in zip.")
+                tele.send_telegram(bot_token, str(chat_id), "No images found in zip.")
 
         except Exception as e:
             print(f"Error processing zip: {e}")
-            tele.send_telegram(bot_token, str(chat_id), "Error processing zip file.")
+            tele.send_telegram(bot_token, str(chat_id), f"Error processing zip file: {_describe_error(e)}")
         finally:
             # Cleanup
-            if os.path.exists(zip_path): os.remove(zip_path)
-            if os.path.exists(extract_dir): shutil.rmtree(extract_dir)
-            if os.path.exists(processed_dir): shutil.rmtree(processed_dir)
-            if os.path.exists(result_zip_path): os.remove(result_zip_path)
+            if zip_path and os.path.exists(zip_path): os.remove(zip_path)
+            if extract_dir and os.path.exists(extract_dir): shutil.rmtree(extract_dir)
+            if processed_dir and os.path.exists(processed_dir): shutil.rmtree(processed_dir)
+            if result_zip_path and os.path.exists(result_zip_path): os.remove(result_zip_path)
 
 def process_photo(bot_token, chat_id, photo_list):
     watermark_path = get_watermark_path(chat_id)
@@ -365,12 +414,11 @@ def process_photo(bot_token, chat_id, photo_list):
         photo = photo_list[-1]
         file_id = photo["file_id"]
         
-        # Download
-        filename = tele.get_telegram_file(bot_token, str(chat_id), file_id, TEMP_DIR)
-        if filename:
-            local_path = os.path.join(TEMP_DIR, filename)
-            output_path = os.path.join(TEMP_DIR, f"watermarked_{filename}")
-            
+        local_path = output_path = None
+        try:
+            local_path = _download_file(bot_token, file_id)
+            output_path = os.path.join(TEMP_DIR, f"watermarked_{os.path.basename(local_path)}")
+
             settings = load_settings(chat_id)
             # Unpack settings for the core function
             position = settings.get("position", "repeated")
@@ -385,11 +433,14 @@ def process_photo(bot_token, chat_id, photo_list):
                 tele.send_telegram_file(bot_token, str(chat_id), output_path)
             else:
                 tele.send_telegram(bot_token, str(chat_id), "Error processing image.")
-            
+        except Exception as e:
+            print(f"Error processing photo: {e}")
+            tele.send_telegram(bot_token, str(chat_id), f"Error processing image: {_describe_error(e)}")
+        finally:
             # Cleanup
-            if os.path.exists(local_path):
+            if local_path and os.path.exists(local_path):
                 os.remove(local_path)
-            if os.path.exists(output_path):
+            if output_path and os.path.exists(output_path):
                 os.remove(output_path)
     else:
         tele.send_telegram(bot_token, str(chat_id), "No watermark set and default 'sun.webp' not found. Use /source <url> to set one.")
@@ -400,18 +451,23 @@ def handle_update(bot_token, update):
         
     message = update["message"]
     chat_id = message["chat"]["id"]
-    
-    # Handle Text Commands
-    if "text" in message:
-        process_text(bot_token, chat_id, message["text"])
-    
-    # Handle Photos
-    if "photo" in message:
-        process_photo(bot_token, chat_id, message["photo"])
 
-    # Handle Documents (Zip)
-    if "document" in message:
-        process_document(bot_token, chat_id, message["document"])
+    try:
+        # Handle Text Commands
+        if "text" in message:
+            process_text(bot_token, chat_id, message["text"])
+
+        # Handle Photos
+        if "photo" in message:
+            process_photo(bot_token, chat_id, message["photo"])
+
+        # Handle Documents (Zip)
+        if "document" in message:
+            process_document(bot_token, chat_id, message["document"])
+    except Exception as e:
+        # Never fail silently: tell the user what went wrong
+        print(f"Error handling update for {chat_id}: {e}")
+        tele.send_telegram(bot_token, str(chat_id), f"Error: {_describe_error(e)}")
 
 def main():
     ensure_dirs()
