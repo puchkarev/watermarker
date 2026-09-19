@@ -3,7 +3,7 @@ import sys
 import os
 from PIL import Image, ImageChops
 
-def apply_watermark(base_image_path, watermark_path="sun.webp", output_path="output.webp", position="bottom right", size=0.25, max_pixels=None, mode="standard", angle=0, strength=1.0):
+def apply_watermark(base_image_path, watermark_path="sun.webp", output_path="output.webp", position="bottom right", size=0.25, max_pixels=None, mode="standard", angle=0, strength=1.0, x_offset=1.0, y_offset=1.0):
     """
     Applies a watermark to an image.
     
@@ -19,6 +19,9 @@ def apply_watermark(base_image_path, watermark_path="sun.webp", output_path="out
         mode (str): Watermarking mode. 'standard', 'difference', or 'negate'.
         angle (float): Rotation angle of the watermark in degrees.
         strength (float): Strength/Opacity of the watermark (0.0 - 1.0).
+        x_offset (float): Horizontal spacing as a multiple of the watermark width
+            (1.0 = no gap between tiles / flush with the edge).
+        y_offset (float): Vertical spacing as a multiple of the watermark height.
     
     Returns:
         bool: True if successful, False otherwise.
@@ -68,54 +71,55 @@ def apply_watermark(base_image_path, watermark_path="sun.webp", output_path="out
         
         watermark_layer = Image.new('RGBA', base.size, (0, 0, 0, 0))
         
-        padding = int(base.width * 0.02)
+        x_padding = int(target_width * (x_offset - 1.0))
+        y_padding = int(target_height * (y_offset - 1.0))
         
         positions = []
         if position == "repeated":
             # Tile the watermark with brick offset
             row_index = 0
-            for y in range(0, base.height, target_height + padding):
+            for y in range(0, base.height, target_height + y_padding):
                 offset = 0
                 if row_index % 2 == 1:
-                    offset = (target_width + padding) // 2
+                    offset = (target_width + x_padding) // 2
                 
                 # Start x from -offset to ensure coverage on the left
-                for x in range(-offset, base.width, target_width + padding):
+                for x in range(-offset, base.width, target_width + x_padding):
                     positions.append((x, y))
                 row_index += 1
         else:
             # Calculate coordinates
             # Default to bottom right
-            x = base.width - target_width - padding
-            y = base.height - target_height - padding
+            x = base.width - target_width - x_padding
+            y = base.height - target_height - y_padding
             
             if position == "top left":
-                x = padding
-                y = padding
+                x = x_padding
+                y = y_padding
             elif position == "top":
                 x = (base.width - target_width) // 2
-                y = padding
+                y = y_padding
             elif position == "top right":
-                x = base.width - target_width - padding
-                y = padding
+                x = base.width - target_width - x_padding
+                y = y_padding
             elif position == "left":
-                x = padding
+                x = x_padding
                 y = (base.height - target_height) // 2
             elif position == "center":
                 x = (base.width - target_width) // 2
                 y = (base.height - target_height) // 2
             elif position == "right":
-                x = base.width - target_width - padding
+                x = base.width - target_width - x_padding
                 y = (base.height - target_height) // 2
             elif position == "bottom left":
-                x = padding
-                y = base.height - target_height - padding
+                x = x_padding
+                y = base.height - target_height - y_padding
             elif position == "bottom":
                 x = (base.width - target_width) // 2
-                y = base.height - target_height - padding
+                y = base.height - target_height - y_padding
             elif position == "bottom right":
-                x = base.width - target_width - padding
-                y = base.height - target_height - padding
+                x = base.width - target_width - x_padding
+                y = base.height - target_height - y_padding
             
             positions.append((x, y))
 
