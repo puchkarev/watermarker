@@ -996,16 +996,27 @@ class TestWatermarker(unittest.TestCase):
         path = os.path.join(self.test_dir, "est.png")
         Image.new('RGB', (4000, 3000), color='white').save(path)  # 12 MP
         mb = watermarker._estimate_job_mb(path, 8000000)
-        self.assertAlmostEqual(mb, (12e6 * 8 + 8e6 * 48) / 2**20, places=3)
-        self.assertAlmostEqual(watermarker._estimate_job_mb(path, None), 12e6 * 56 / 2**20, places=3)
+        self.assertAlmostEqual(mb, (12e6 * 8 + 8e6 * 56) / 2**20, places=3)
+        self.assertAlmostEqual(watermarker._estimate_job_mb(path, None), 12e6 * 64 / 2**20, places=3)
+
+    def test_estimate_job_mb_covers_measured_8mp_peak(self):
+        # Measured peak for an 8MP photo with the bot's defaults is ~435-450 MB;
+        # the estimate must not come in under it, or an extra worker gets scheduled
+        path = os.path.join(self.test_dir, "8mp.png")
+        Image.new('RGB', (3266, 2449), color='white').save(path)
+        self.assertGreater(watermarker._estimate_job_mb(path, 8000000), 450)
         self.assertEqual(watermarker._estimate_job_mb(os.path.join(self.test_dir, "missing.png"), None), 0)
 
     @patch('watermarker.os.cpu_count', return_value=4)
     def test_worker_count_bounded_by_lambda_memory(self, mock_cpus):
-        cases = {"512": 1, "1024": 1, "1536": 2, "2048": 4, "10240": 4}
+        # Use the estimator's own figure for an 8MP job, not a hand-picked one
+        path = os.path.join(self.test_dir, "8mp.png")
+        Image.new('RGB', (3266, 2449), color='white').save(path)
+        job_mb = watermarker._estimate_job_mb(path, 8000000)
+        cases = {"512": 1, "1024": 1, "1536": 2, "2048": 3, "10240": 4}
         for memory, expected in cases.items():
             with patch.dict(os.environ, {"AWS_LAMBDA_FUNCTION_MEMORY_SIZE": memory}):
-                self.assertEqual(watermarker._worker_count(450), expected, memory)
+                self.assertEqual(watermarker._worker_count(job_mb), expected, memory)
         with patch.dict(os.environ, {"AWS_LAMBDA_FUNCTION_MEMORY_SIZE": "1024"}):
             self.assertEqual(watermarker._worker_count(200), 4)
             # An unreadable image (estimate 0) doesn't unlock extra workers

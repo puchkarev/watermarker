@@ -390,11 +390,13 @@ def process_text(bot_token, chat_id, text):
 
 NO_WATERMARK_MESSAGE = "No watermark set and default 'sun.webp' not found. Use /source <url> to set one."
 
-# Peak memory of one watermark job, measured: decoding costs ~8 bytes per input pixel,
-# and the RGBA working copies (base, watermark layer, composite) ~48 per output pixel.
-# An 8MP photo peaks around 450 MB; a 33MP one resized to 8MP around 600 MB.
+# Peak memory of one watermark job: decoding costs ~8 bytes per input pixel, and the
+# RGBA working copies (base, watermark layer, composite) the rest. Measured peaks: an
+# 8MP photo ~435-450 MB, a 33MP one resized to 8MP ~600 MB. The per-output constant is
+# padded so the common 8MP-in/8MP-out case estimates above its real cost (488 MB);
+# peak memory also varies with image content (decode/encode buffers).
 JOB_BYTES_PER_INPUT_PIXEL = 8
-JOB_BYTES_PER_OUTPUT_PIXEL = 48
+JOB_BYTES_PER_OUTPUT_PIXEL = 56
 # Python, the libraries and (on Lambda) the runtime itself
 MEMORY_RESERVE_MB = 200
 
