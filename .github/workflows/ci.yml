@@ -12,6 +12,12 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.10 is the oldest supported version; 3.12 is what the Lambda runs
+        # (serverless/template.yaml), checked below so the two can't drift apart
+        python-version: ['3.10', '3.12']
 
     steps:
     - uses: actions/checkout@v4
@@ -22,7 +28,25 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@v4
       with:
-        python-version: '3.10'
+        python-version: ${{ matrix.python-version }}
+
+    - name: Check the Lambda runtime is a tested version
+      run: |
+        runtime=$(sed -n 's/^ *Runtime: python\([0-9.]*\)$/\1/p' serverless/template.yaml)
+        wheels=$(sed -n 's/.*--python-version \([0-9.]*\).*/\1/p' serverless/deploy.sh)
+        echo "template.yaml runtime: $runtime, deploy.sh wheels: $wheels"
+        if [ -z "$runtime" ] || [ -z "$wheels" ]; then
+          echo "::error::Couldn't read the Python version from serverless/template.yaml or serverless/deploy.sh"
+          exit 1
+        fi
+        if [ "$runtime" != "$wheels" ]; then
+          echo "::error::serverless/template.yaml runs Python $runtime but deploy.sh packages wheels for $wheels"
+          exit 1
+        fi
+        if ! grep -Eq "^ *python-version: \[.*'$runtime'.*\]" .github/workflows/ci.yml; then
+          echo "::error::The Lambda runs Python $runtime, which the CI matrix doesn't test"
+          exit 1
+        fi
 
     - name: Install dependencies
       run: |

@@ -17,9 +17,14 @@ if HEIF_SUPPORTED:
 
 DEFAULT_QUALITY = 80
 
-def apply_watermark(base_image_path, watermark_path="sun.webp", output_path="output.webp", position="bottom right", size=0.25, max_pixels=None, mode="standard", angle=0, strength=1.0, x_offset=1.0, y_offset=1.0, quality=DEFAULT_QUALITY):
+def apply_watermark(base_image_path, watermark_path="sun.webp", output_path="output.webp", *,
+                    position="bottom right", size=0.25, max_pixels=None, mode="standard", angle=0,
+                    strength=1.0, x_offset=1.0, y_offset=1.0, quality=DEFAULT_QUALITY):
     """
     Applies a watermark to an image.
+
+    Everything after the three paths is keyword-only: several options are bare
+    numbers, and passing them positionally would let a swap go unnoticed.
     
     Args:
         base_image_path (str): Path to the base image.
@@ -244,6 +249,9 @@ def main():
     args = parser.parse_args()
     
     max_pixels = 8000000 if args.resize_8mp else None
+    options = dict(position=args.position, size=args.size, max_pixels=max_pixels, mode=args.mode,
+                   angle=args.angle, strength=args.strength, x_offset=args.x_offset,
+                   y_offset=args.y_offset, quality=args.quality)
 
     if os.path.isdir(args.base_image):
         # Batch processing
@@ -265,7 +273,7 @@ def main():
                 output_path = os.path.join(args.output_image, output_filename)
                 
                 print(f"Processing {filename} -> {output_filename}...")
-                if apply_watermark(input_path, args.watermark_image, output_path, args.position, args.size, max_pixels, args.mode, args.angle, args.strength, args.x_offset, args.y_offset, args.quality):
+                if apply_watermark(input_path, args.watermark_image, output_path, **options):
                     processed_count += 1
                 else:
                     print(f"Failed to process {filename}")
@@ -275,7 +283,7 @@ def main():
 
     else:
         # Single file processing
-        if apply_watermark(args.base_image, args.watermark_image, args.output_image, args.position, args.size, max_pixels, args.mode, args.angle, args.strength, args.x_offset, args.y_offset, args.quality):
+        if apply_watermark(args.base_image, args.watermark_image, args.output_image, **options):
             print(f"Successfully saved to {args.output_image}")
             sys.exit(0)
         else:
