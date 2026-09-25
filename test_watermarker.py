@@ -6,6 +6,7 @@ import shutil
 import json
 import zipfile
 import errno
+import time
 from PIL import Image
 from io import BytesIO
 
@@ -827,6 +828,19 @@ class TestWatermarker(unittest.TestCase):
             with Image.open(out) as img:
                 self.assertEqual(img.info.get("icc_profile"), icc)
 
+    def test_apply_watermark_drops_non_rgb_icc_profile(self):
+        from PIL import ImageCms
+        rgb_icc = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
+        # The ICC header's colour-space field (bytes 16-20) is what identifies gray/CMYK profiles
+        for mode, space in (("L", b"GRAY"), ("CMYK", b"CMYK")):
+            path = os.path.join(self.test_dir, f"{mode}.jpg")
+            Image.new(mode, (80, 80)).save(path, icc_profile=rgb_icc[:16] + space + rgb_icc[20:])
+            out = os.path.join(self.test_dir, f"{mode}.webp")
+            self.assertTrue(apply_watermark(path, self._wm(), out, size=0.2))
+            with Image.open(out) as img:
+                self.assertEqual(img.mode, "RGB")
+                self.assertIsNone(img.info.get("icc_profile"))
+
     def test_apply_watermark_quality(self):
         path = os.path.join(self.test_dir, "noise.png")
         Image.effect_noise((300, 300), 60).convert("RGB").save(path)
@@ -842,7 +856,19 @@ class TestWatermarker(unittest.TestCase):
         Image.new('RGB', (200, 200), color='white').save(path)
         out = os.path.join(self.test_dir, "tight.webp")
         self.assertTrue(apply_watermark(path, self._wm(), out, position="repeated",
-                                        size=0.05, x_offset=0.1, y_offset=0.1))
+                                        size=1.0, x_offset=0.1, y_offset=0.1))
+
+    def test_apply_watermark_rejects_offsets_that_stop_tiling(self):
+        path = os.path.join(self.test_dir, "base.png")
+        Image.new('RGB', (1200, 900), color='white').save(path)
+        out = os.path.join(self.test_dir, "zero.webp")
+        for x_offset, y_offset in ((0, 1.0), (1.0, 0), (-1.0, 1.0)):
+            start = time.monotonic()
+            self.assertFalse(apply_watermark(path, self._wm(), out, position="repeated",
+                                             size=0.5, x_offset=x_offset, y_offset=y_offset))
+            # Fails immediately instead of pasting at every pixel
+            self.assertLess(time.monotonic() - start, 1.0)
+        self.assertFalse(os.path.exists(out))
 
     @unittest.skipUnless(HEIF_SUPPORTED, "pillow-heif not installed")
     def test_apply_watermark_heic_input(self):
@@ -933,6 +959,71 @@ class TestWatermarker(unittest.TestCase):
         self.assertEqual(sent["entries"], [f"img{i}.webp" for i in range(6)])
         self.assertEqual(sent["caption"], "Watermarked 6 image(s). 1 failed.")
         self.assertIn("broken.jpg", mock_send.call_args[0][2])
+
+    @patch('watermarker.tele.send_telegram')
+    @patch('watermarker._send_document')
+    @patch('watermarker._download_file')
+    @patch('watermarker._worker_count', return_value=4)
+    def test_zip_same_name_images_get_distinct_outputs(self, mock_workers, mock_download, mock_send_doc, mock_send):
+        mock_download.return_value = self._make_zip("dupes.zip", {
+            "photo.jpg": self._image_bytes(),
+            "photo.png": self._image_bytes(),
+            "photo-1.webp": self._image_bytes(),
+            "Photo.PNG": self._image_bytes(),  # clashes on case-insensitive file systems
+            "sub/photo.png": self._image_bytes(),  # other folder: no clash
+        })
+        sent = {}
+
+        def capture(bot_token, chat_id, path, file_name, caption=""):
+            with zipfile.ZipFile(path) as zf:
+                sent["entries"] = sorted(n for n in zf.namelist() if not n.endswith("/"))
+            sent["caption"] = caption
+
+        mock_send_doc.side_effect = capture
+        watermarker.process_document("token", 123, {"file_id": "z", "file_name": "dupes.zip"})
+
+        self.assertEqual(sent["entries"], ["Photo.webp", "photo-1.webp", "photo-2.webp", "photo-3.webp", "sub/photo.webp"])
+        self.assertEqual(sent["caption"], "Watermarked 5 image(s).")
+
+    def test_unique_output_path(self):
+        taken = set()
+        names = [watermarker._unique_output_path(n, taken) for n in ("a.jpg", "a.png", "A.tif", "b/a.jpg")]
+        self.assertEqual(names, ["a.webp", "a-1.webp", "A-2.webp", os.path.join("b", "a") + ".webp"])
+
+    # --- Worker count: bounded by CPU and memory ---
+
+    def test_estimate_job_mb(self):
+        path = os.path.join(self.test_dir, "est.png")
+        Image.new('RGB', (4000, 3000), color='white').save(path)  # 12 MP
+        mb = watermarker._estimate_job_mb(path, 8000000)
+        self.assertAlmostEqual(mb, (12e6 * 8 + 8e6 * 48) / 2**20, places=3)
+        self.assertAlmostEqual(watermarker._estimate_job_mb(path, None), 12e6 * 56 / 2**20, places=3)
+        self.assertEqual(watermarker._estimate_job_mb(os.path.join(self.test_dir, "missing.png"), None), 0)
+
+    @patch('watermarker.os.cpu_count', return_value=4)
+    def test_worker_count_bounded_by_lambda_memory(self, mock_cpus):
+        cases = {"512": 1, "1024": 1, "1536": 2, "2048": 4, "10240": 4}
+        for memory, expected in cases.items():
+            with patch.dict(os.environ, {"AWS_LAMBDA_FUNCTION_MEMORY_SIZE": memory}):
+                self.assertEqual(watermarker._worker_count(450), expected, memory)
+        with patch.dict(os.environ, {"AWS_LAMBDA_FUNCTION_MEMORY_SIZE": "1024"}):
+            self.assertEqual(watermarker._worker_count(200), 4)
+            # An unreadable image (estimate 0) doesn't unlock extra workers
+            self.assertEqual(watermarker._worker_count(0), 1)
+
+    @patch('watermarker._available_memory_mb', return_value=None)
+    @patch('watermarker.os.cpu_count', return_value=8)
+    def test_worker_count_sequential_when_memory_unknown(self, mock_cpus, mock_mem):
+        self.assertEqual(watermarker._worker_count(450), 1)
+
+    @patch('watermarker.os.cpu_count', return_value=2)
+    def test_worker_count_off_lambda_uses_meminfo(self, mock_cpus):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("AWS_LAMBDA_FUNCTION_MEMORY_SIZE", None)
+            meminfo = "MemTotal: 16000000 kB\nMemAvailable:     716800 kB\n"
+            with patch('builtins.open', unittest.mock.mock_open(read_data=meminfo)):
+                self.assertEqual(watermarker._available_memory_mb(), 700)
+                self.assertEqual(watermarker._worker_count(450), 1)
 
     @patch('watermarker.tele.send_telegram')
     @patch('watermarker._send_document')

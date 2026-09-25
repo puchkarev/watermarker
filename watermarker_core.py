@@ -43,8 +43,13 @@ def apply_watermark(base_image_path, watermark_path="sun.webp", output_path="out
     """
     try:
         with Image.open(base_image_path) as source:
-            # Keep the colour profile (e.g. Adobe RGB, Display P3) so colours don't shift
+            # Keep an RGB colour profile (e.g. Adobe RGB, Display P3) so colours don't shift.
+            # Gray/CMYK profiles no longer describe the pixels once converted to RGB, so
+            # those are dropped (untagged RGB is read as sRGB). Bytes 16-20 of an ICC
+            # header name the profile's colour space.
             icc_profile = source.info.get("icc_profile")
+            if icc_profile and icc_profile[16:20] != b"RGB ":
+                icc_profile = None
             # Cameras and phones often store portrait shots sideways plus a rotate tag;
             # apply the rotation, since the tag isn't carried into the output
             try:
@@ -102,15 +107,22 @@ def apply_watermark(base_image_path, watermark_path="sun.webp", output_path="out
         
         positions = []
         if position == "repeated":
+            x_step = target_width + x_padding
+            y_step = target_height + y_padding
+            if x_step < 1:
+                raise ValueError(f"x_offset {x_offset} is too small: tiles would not advance horizontally")
+            if y_step < 1:
+                raise ValueError(f"y_offset {y_offset} is too small: tiles would not advance vertically")
+
             # Tile the watermark with brick offset
             row_index = 0
-            for y in range(0, base.height, max(1, target_height + y_padding)):
+            for y in range(0, base.height, y_step):
                 offset = 0
                 if row_index % 2 == 1:
-                    offset = (target_width + x_padding) // 2
+                    offset = x_step // 2
                 
                 # Start x from -offset to ensure coverage on the left
-                for x in range(-offset, base.width, max(1, target_width + x_padding)):
+                for x in range(-offset, base.width, x_step):
                     positions.append((x, y))
                 row_index += 1
         else:

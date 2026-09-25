@@ -390,9 +390,61 @@ def process_text(bot_token, chat_id, text):
 
 NO_WATERMARK_MESSAGE = "No watermark set and default 'sun.webp' not found. Use /source <url> to set one."
 
-def _worker_count():
+# Peak memory of one watermark job, measured: decoding costs ~8 bytes per input pixel,
+# and the RGBA working copies (base, watermark layer, composite) ~48 per output pixel.
+# An 8MP photo peaks around 450 MB; a 33MP one resized to 8MP around 600 MB.
+JOB_BYTES_PER_INPUT_PIXEL = 8
+JOB_BYTES_PER_OUTPUT_PIXEL = 48
+# Python, the libraries and (on Lambda) the runtime itself
+MEMORY_RESERVE_MB = 200
+
+def _available_memory_mb():
+    """Memory this process can use: the Lambda's configured size, else MemAvailable. None if unknown."""
+    lambda_mb = os.environ.get("AWS_LAMBDA_FUNCTION_MEMORY_SIZE")
+    if lambda_mb:
+        return int(lambda_mb)
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) // 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+def _estimate_job_mb(path, max_pixels):
+    """Peak memory for watermarking one image, from its header alone (no decode)."""
+    try:
+        with Image.open(path) as img:
+            input_pixels = img.width * img.height
+    except Exception:
+        return 0  # unreadable: apply_watermark will fail fast and report it
+    output_pixels = min(input_pixels, max_pixels) if max_pixels else input_pixels
+    return (input_pixels * JOB_BYTES_PER_INPUT_PIXEL + output_pixels * JOB_BYTES_PER_OUTPUT_PIXEL) / 2**20
+
+def _worker_count(job_mb):
+    """Threads for a batch whose largest job needs job_mb: bounded by CPUs and by memory."""
     # Pillow releases the GIL while decoding, resizing and encoding, so threads run in parallel
-    return max(1, min(4, os.cpu_count() or 1))
+    by_cpu = max(1, min(4, os.cpu_count() or 1))
+    available = _available_memory_mb()
+    if available is None or job_mb <= 0:
+        # Can't tell whether parallel jobs fit: process one at a time, as before
+        return 1
+    return max(1, min(by_cpu, int((available - MEMORY_RESERVE_MB) // job_mb)))
+
+def _unique_output_path(rel_path, taken):
+    """photo.jpg -> photo.webp, but photo.png in the same folder -> photo-1.webp.
+
+    Compared case-insensitively, since the zip may be unpacked on macOS or Windows.
+    """
+    stem = os.path.splitext(rel_path)[0]
+    candidate = stem + ".webp"
+    counter = 1
+    while candidate.lower() in taken:
+        candidate = f"{stem}-{counter}.webp"
+        counter += 1
+    taken.add(candidate.lower())
+    return candidate
 
 def process_document(bot_token, chat_id, document):
     file_name = document.get("file_name", "")
@@ -448,7 +500,9 @@ def _process_zip(bot_token, chat_id, file_id, file_name):
         # Collect the work: every image, keeping the zip's folder structure, converted to webp
         jobs = []
         skipped = []
+        taken = set()
         for root, dirs, files in os.walk(extract_dir):
+            dirs.sort()  # deterministic order, so name de-duplication is stable
             for filename in sorted(files):
                 input_path = os.path.join(root, filename)
                 rel_path = os.path.relpath(input_path, extract_dir)
@@ -457,7 +511,7 @@ def _process_zip(bot_token, chat_id, file_id, file_name):
                 if not _is_image_name(filename):
                     skipped.append(rel_path)
                     continue
-                output_path = os.path.join(processed_dir, os.path.splitext(rel_path)[0] + ".webp")
+                output_path = os.path.join(processed_dir, _unique_output_path(rel_path, taken))
                 os.makedirs(os.path.dirname(output_path), exist_ok=True)
                 jobs.append((input_path, rel_path, output_path))
 
@@ -465,7 +519,8 @@ def _process_zip(bot_token, chat_id, file_id, file_name):
             input_path, _, output_path = job
             return apply_watermark(input_path, watermark_path, output_path, **options)
 
-        with ThreadPoolExecutor(max_workers=_worker_count()) as pool:
+        largest_job_mb = max((_estimate_job_mb(job[0], options["max_pixels"]) for job in jobs), default=0)
+        with ThreadPoolExecutor(max_workers=_worker_count(largest_job_mb)) as pool:
             results = list(pool.map(run, jobs))
 
         processed_count = results.count(True)
