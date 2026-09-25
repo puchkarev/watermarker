@@ -60,13 +60,44 @@ For production environments, you can use the provided deployment script to fetch
 
 ### Serverless Deployment (AWS Lambda, on demand)
 
-If the bot is only used occasionally, it can instead run on AWS Lambda. It only runs while it handles a message, so a bot used for one batch a week costs effectively nothing. It uses the same bot code, and nothing is stored except per-chat settings.
+If the bot is only used occasionally, it can instead run on AWS Lambda. It only runs while it handles a message, so a bot used for one batch a week costs effectively nothing (it stays inside the AWS free tier). It uses the same bot code, and nothing is stored except each chat's settings.
 
+**Before you start:** one bot token can only be used by one deployment at a time. Once the Lambda is connected, a server copy of the bot using the same token stops receiving messages. Either stop the server version first (`sudo systemctl stop watermarker`), or create a second bot for the Lambda with [@BotFather](https://t.me/BotFather) (`/newbot`).
+
+**Quick start (AWS CloudShell):**
+
+1.  Sign in to the AWS console and open **CloudShell** (the `>_` icon in the top bar). It already has every tool the script needs and is logged in to your account.
+2.  Run:
+    ```bash
+    git clone --recursive https://github.com/puchkarev/watermarker.git
+    cd watermarker
+    ./serverless/deploy.sh deploy --region us-east-1
+    ```
+3.  Paste your bot token when asked. The script builds the package, creates the AWS resources, uploads the code, and connects your Telegram bot to it.
+4.  When it prints `Done`, send the bot `/help`, then a photo or a zip.
+
+To deploy from your own machine instead, install the [AWS CLI v2](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html), `python3` with `pip`, `curl` and `zip`, and run `aws configure` first.
+
+**Recommended:** limit the bot to your own chats so strangers can't use your AWS account. Deploy once with `--allowed-chat-ids 0` and message the bot: it replies with your chat id. Then redeploy with your id(s):
 ```bash
-./serverless/deploy.sh deploy
+./serverless/deploy.sh deploy --allowed-chat-ids 123456789
 ```
 
-See [serverless/README.md](serverless/README.md) for step-by-step instructions, including how it can run alongside the server deployment above.
+**Managing it:**
+
+| Command | What it does |
+|---|---|
+| `./serverless/deploy.sh deploy` | Build and deploy, or redeploy after a `git pull`. Keeps the token, allowlist and chat settings. |
+| `./serverless/deploy.sh status` | Show the setup and whether Telegram can reach it |
+| `./serverless/deploy.sh logs` | Follow the bot's logs live |
+| `./serverless/deploy.sh detach` / `attach` | Hand the bot token to a server copy and back |
+| `./serverless/deploy.sh remove` | Delete the AWS resources (the small settings bucket is kept; the script prints how to delete it) |
+
+**Limits:** Telegram only lets bots download files up to 20 MB, so split larger batches into several zips. Each zip gets up to 15 minutes to process.
+
+See [serverless/README.md](serverless/README.md) for the full guide: creating AWS credentials, what gets created in your account, costs, switching between the server and Lambda, and troubleshooting.
+
+The server deployment above (`scripts/deploy.sh`) also works on an AWS EC2 Linux instance if you prefer an always-on bot.
 
 ## Configuration
 
