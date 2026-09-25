@@ -192,7 +192,7 @@ class TestLambdaFunction(unittest.TestCase):
         lambda_function.handler(_task_event(_text_update("/settings", chat_id=1)), self.context)
         self.assertIn("- angle: 45", mock_send.call_args[0][2])
 
-    @patch("watermarker.tele.send_telegram_file")
+    @patch("watermarker._send_document")
     @patch("watermarker._download_file")
     def test_task_watermarks_photo_and_cleans_up(self, mock_download, mock_send_file):
         def fake_download(bot_token, file_id):
@@ -201,7 +201,7 @@ class TestLambdaFunction(unittest.TestCase):
             return path
         mock_download.side_effect = fake_download
         sent = {}
-        def fake_send(token, chat, path):
+        def fake_send(token, chat, path, file_name, caption=""):
             with Image.open(path) as img:
                 sent.update(exists=True, size=img.size)
         mock_send_file.side_effect = fake_send

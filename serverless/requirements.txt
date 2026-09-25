@@ -1,5 +1,7 @@
 # Packaged into the Lambda zip by deploy.sh (boto3 is provided by the Lambda runtime)
 Pillow
 requests
+# Lets the bot read iPhone HEIC/HEIF photos (the bot still runs without it, minus HEIC)
+pillow-heif
 # Used by the telegram submodule to send single watermarked photos back
 python-telegram-bot==22.0

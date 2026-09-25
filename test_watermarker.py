@@ -6,12 +6,14 @@ import shutil
 import json
 import zipfile
 import errno
+import time
 from PIL import Image
 from io import BytesIO
 
 # Ensure we can import watermarker
 sys.path.append(os.path.dirname(__file__))
 import watermarker
+from watermarker_core import apply_watermark, HEIF_SUPPORTED, SUPPORTED_EXTS
 
 class TestWatermarker(unittest.TestCase):
 
@@ -512,11 +514,11 @@ class TestWatermarker(unittest.TestCase):
     @patch('watermarker.tele.send_telegram')
     def test_process_text_source_no_url(self, mock_send):
         watermarker.process_text("token", 123, "/source")
-        # Should not crash; no message sent for missing url (current behavior)
+        self.assertIn("Usage: /source", mock_send.call_args[0][2])
 
     # --- Photo processing tests ---
 
-    @patch('watermarker.tele.send_telegram_file')
+    @patch('watermarker._send_document')
     @patch('watermarker._download_file')
     @patch('watermarker.apply_watermark')
     def test_process_photo(self, mock_apply, mock_get_file, mock_send_file):
@@ -544,8 +546,11 @@ class TestWatermarker(unittest.TestCase):
         self.assertIn("max_pixels", mock_apply.call_args[1])
         self.assertEqual(mock_apply.call_args[1]["x_offset"], 3.0)
         self.assertEqual(mock_apply.call_args[1]["y_offset"], 3.0)
+        self.assertEqual(mock_apply.call_args[1]["quality"], 80)
 
+        # Sent back as a file so Telegram doesn't recompress it
         mock_send_file.assert_called()
+        self.assertEqual(mock_send_file.call_args[0][3], "watermarked.jpg")
 
     @patch('watermarker.tele.send_telegram')
     @patch('watermarker.os.path.exists', return_value=False)
@@ -580,12 +585,13 @@ class TestWatermarker(unittest.TestCase):
 
     # --- Document/zip processing tests ---
 
+    @patch('watermarker.tele.send_telegram')
     @patch('watermarker._send_document')
     @patch('watermarker._download_file')
     @patch('watermarker.apply_watermark')
     @patch('zipfile.ZipFile')
     @patch('shutil.make_archive')
-    def test_process_document_zip(self, mock_make_archive, mock_zipfile, mock_apply, mock_get_file, mock_send_file):
+    def test_process_document_zip(self, mock_make_archive, mock_zipfile, mock_apply, mock_get_file, mock_send_file, mock_send):
         chat_id = 123
         doc = {"file_id": "zip_id", "file_name": "images.zip", "mime_type": "application/zip"}
 
@@ -775,6 +781,344 @@ class TestWatermarker(unittest.TestCase):
             watermarker._send_document("token", 1, path, "orig.zip")
         self.assertIn("Request Entity Too Large", str(ctx.exception))
         self.assertEqual(mock_post.call_args[1]["files"]["document"][0], "orig.zip")
+
+    # --- Image handling: orientation, colour profile, quality, HEIC ---
+
+    def _wm(self):
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)), "sun.webp")
+
+    def test_apply_watermark_honors_exif_orientation(self):
+        # Stored landscape with "rotate 90" tag, the way cameras save portrait shots
+        path = os.path.join(self.test_dir, "portrait.jpg")
+        exif = Image.Exif()
+        exif[0x0112] = 6
+        Image.new('RGB', (400, 300), color='green').save(path, exif=exif)
+        out = os.path.join(self.test_dir, "portrait_out.webp")
+        self.assertTrue(apply_watermark(path, self._wm(), out, position="repeated", size=0.2))
+        with Image.open(out) as img:
+            self.assertEqual(img.size, (300, 400))
+
+    def test_apply_watermark_honors_exif_orientation_in_webp(self):
+        path = os.path.join(self.test_dir, "portrait.webp")
+        exif = Image.Exif()
+        exif[0x0112] = 8
+        Image.new('RGB', (400, 300), color='green').save(path, exif=exif)
+        out = os.path.join(self.test_dir, "portrait_out.webp")
+        self.assertTrue(apply_watermark(path, self._wm(), out, size=0.2))
+        with Image.open(out) as img:
+            self.assertEqual(img.size, (300, 400))
+
+    @patch('watermarker_core.ImageOps.exif_transpose', side_effect=SyntaxError("bad EXIF"))
+    def test_apply_watermark_survives_broken_exif(self, mock_transpose):
+        path = os.path.join(self.test_dir, "broken_exif.jpg")
+        Image.new('RGB', (120, 80), color='green').save(path)
+        out = os.path.join(self.test_dir, "broken_exif.webp")
+        self.assertTrue(apply_watermark(path, self._wm(), out, size=0.2))
+        with Image.open(out) as img:
+            self.assertEqual(img.size, (120, 80))
+
+    def test_apply_watermark_keeps_icc_profile(self):
+        from PIL import ImageCms
+        icc = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
+        path = os.path.join(self.test_dir, "profiled.jpg")
+        Image.new('RGB', (200, 200), color='red').save(path, icc_profile=icc)
+        for ext in (".webp", ".jpg"):
+            out = os.path.join(self.test_dir, "profiled_out" + ext)
+            self.assertTrue(apply_watermark(path, self._wm(), out, size=0.2))
+            with Image.open(out) as img:
+                self.assertEqual(img.info.get("icc_profile"), icc)
+
+    def test_apply_watermark_drops_non_rgb_icc_profile(self):
+        from PIL import ImageCms
+        rgb_icc = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
+        # The ICC header's colour-space field (bytes 16-20) is what identifies gray/CMYK profiles
+        for mode, space in (("L", b"GRAY"), ("CMYK", b"CMYK")):
+            path = os.path.join(self.test_dir, f"{mode}.jpg")
+            Image.new(mode, (80, 80)).save(path, icc_profile=rgb_icc[:16] + space + rgb_icc[20:])
+            out = os.path.join(self.test_dir, f"{mode}.webp")
+            self.assertTrue(apply_watermark(path, self._wm(), out, size=0.2))
+            with Image.open(out) as img:
+                self.assertEqual(img.mode, "RGB")
+                self.assertIsNone(img.info.get("icc_profile"))
+
+    def test_apply_watermark_quality(self):
+        path = os.path.join(self.test_dir, "noise.png")
+        Image.effect_noise((300, 300), 60).convert("RGB").save(path)
+        sizes = {}
+        for quality in (30, 95):
+            out = os.path.join(self.test_dir, f"q{quality}.webp")
+            self.assertTrue(apply_watermark(path, self._wm(), out, size=0.2, quality=quality))
+            sizes[quality] = os.path.getsize(out)
+        self.assertGreater(sizes[95], sizes[30])
+
+    def test_apply_watermark_tight_spacing(self):
+        path = os.path.join(self.test_dir, "base.png")
+        Image.new('RGB', (200, 200), color='white').save(path)
+        out = os.path.join(self.test_dir, "tight.webp")
+        self.assertTrue(apply_watermark(path, self._wm(), out, position="repeated",
+                                        size=1.0, x_offset=0.1, y_offset=0.1))
+
+    def test_apply_watermark_rejects_offsets_that_stop_tiling(self):
+        path = os.path.join(self.test_dir, "base.png")
+        Image.new('RGB', (1200, 900), color='white').save(path)
+        out = os.path.join(self.test_dir, "zero.webp")
+        for x_offset, y_offset in ((0, 1.0), (1.0, 0), (-1.0, 1.0)):
+            start = time.monotonic()
+            self.assertFalse(apply_watermark(path, self._wm(), out, position="repeated",
+                                             size=0.5, x_offset=x_offset, y_offset=y_offset))
+            # Fails immediately instead of pasting at every pixel
+            self.assertLess(time.monotonic() - start, 1.0)
+        self.assertFalse(os.path.exists(out))
+
+    @unittest.skipUnless(HEIF_SUPPORTED, "pillow-heif not installed")
+    def test_apply_watermark_heic_input(self):
+        path = os.path.join(self.test_dir, "iphone.heic")
+        Image.new('RGB', (200, 100), color='blue').save(path)
+        out = os.path.join(self.test_dir, "iphone.webp")
+        self.assertTrue(apply_watermark(path, self._wm(), out, size=0.2))
+        with Image.open(out) as img:
+            self.assertEqual(img.size, (200, 100))
+        self.assertIn(".heic", SUPPORTED_EXTS)
+
+    # --- New commands ---
+
+    @patch('watermarker.tele.send_telegram')
+    def test_process_text_offsets_and_quality(self, mock_send):
+        watermarker.process_text("token", 123, "/x_offset 2.5")
+        watermarker.process_text("token", 123, "/y_offset 1.5")
+        watermarker.process_text("token", 123, "/quality 95")
+        settings = watermarker.load_settings(123)
+        self.assertEqual((settings["x_offset"], settings["y_offset"], settings["quality"]), (2.5, 1.5, 95))
+        self.assertIsInstance(settings["quality"], int)
+
+    @patch('watermarker.tele.send_telegram')
+    def test_process_text_offsets_and_quality_validation(self, mock_send):
+        for command in ("/quality 0", "/quality 101", "/x_offset 20", "/y_offset 0"):
+            watermarker.process_text("token", 123, command)
+            self.assertIn("must be between", mock_send.call_args[0][2])
+        watermarker.process_text("token", 123, "/quality high")
+        self.assertIn("Invalid number", mock_send.call_args[0][2])
+        watermarker.process_text("token", 123, "/x_offset")
+        self.assertIn("Usage: /x_offset", mock_send.call_args[0][2])
+        self.assertEqual(watermarker.load_settings(123)["quality"], 80)
+
+    @patch('watermarker.tele.send_telegram')
+    def test_help_lists_new_commands(self, mock_send):
+        watermarker.process_text("token", 123, "/help")
+        for command in ("/x_offset", "/y_offset", "/quality"):
+            self.assertIn(command, mock_send.call_args[0][2])
+            self.assertIn(command[1:], watermarker.BOT_COMMANDS)
+
+    # --- Zips: OS junk, non-image files, parallel processing ---
+
+    @patch('watermarker.tele.send_telegram')
+    @patch('watermarker._send_document')
+    @patch('watermarker._download_file')
+    def test_zip_ignores_os_junk_and_reports_skipped_files(self, mock_download, mock_send_doc, mock_send):
+        mock_download.return_value = self._make_zip("junk.zip", {
+            "a.png": self._image_bytes(),
+            "__MACOSX/._a.png": b"AppleDouble metadata",
+            "._b.jpg": b"AppleDouble metadata",
+            ".DS_Store": b"junk",
+            "notes.txt": b"hello",
+        })
+        sent = {}
+
+        def capture(bot_token, chat_id, path, file_name, caption=""):
+            with zipfile.ZipFile(path) as zf:
+                sent["entries"] = zf.namelist()
+            sent["caption"] = caption
+
+        mock_send_doc.side_effect = capture
+        watermarker.process_document("token", 123, {"file_id": "z", "file_name": "p.zip"})
+
+        self.assertEqual(sent["entries"], ["a.webp"])
+        self.assertEqual(sent["caption"], "Watermarked 1 image(s). Skipped 1 non-image file(s).")
+        # Junk isn't reported as failed images
+        for call in mock_send.call_args_list:
+            self.assertNotIn("Could not process", call[0][2])
+
+    @patch('watermarker.tele.send_telegram')
+    @patch('watermarker._send_document')
+    @patch('watermarker._download_file')
+    @patch('watermarker._worker_count', return_value=4)
+    def test_zip_parallel_processing_reports_each_result(self, mock_workers, mock_download, mock_send_doc, mock_send):
+        entries = {f"img{i}.png": self._image_bytes() for i in range(6)}
+        entries["broken.jpg"] = b"not an image"
+        mock_download.return_value = self._make_zip("many.zip", entries)
+        sent = {}
+
+        def capture(bot_token, chat_id, path, file_name, caption=""):
+            with zipfile.ZipFile(path) as zf:
+                sent["entries"] = sorted(zf.namelist())
+            sent["caption"] = caption
+
+        mock_send_doc.side_effect = capture
+        watermarker.process_document("token", 123, {"file_id": "z", "file_name": "many.zip"})
+
+        self.assertEqual(sent["entries"], [f"img{i}.webp" for i in range(6)])
+        self.assertEqual(sent["caption"], "Watermarked 6 image(s). 1 failed.")
+        self.assertIn("broken.jpg", mock_send.call_args[0][2])
+
+    @patch('watermarker.tele.send_telegram')
+    @patch('watermarker._send_document')
+    @patch('watermarker._download_file')
+    @patch('watermarker._worker_count', return_value=4)
+    def test_zip_same_name_images_get_distinct_outputs(self, mock_workers, mock_download, mock_send_doc, mock_send):
+        mock_download.return_value = self._make_zip("dupes.zip", {
+            "photo.jpg": self._image_bytes(),
+            "photo.png": self._image_bytes(),
+            "photo-1.webp": self._image_bytes(),
+            "Photo.PNG": self._image_bytes(),  # clashes on case-insensitive file systems
+            "sub/photo.png": self._image_bytes(),  # other folder: no clash
+        })
+        sent = {}
+
+        def capture(bot_token, chat_id, path, file_name, caption=""):
+            with zipfile.ZipFile(path) as zf:
+                sent["entries"] = sorted(n for n in zf.namelist() if not n.endswith("/"))
+            sent["caption"] = caption
+
+        mock_send_doc.side_effect = capture
+        watermarker.process_document("token", 123, {"file_id": "z", "file_name": "dupes.zip"})
+
+        self.assertEqual(sent["entries"], ["Photo.webp", "photo-1.webp", "photo-2.webp", "photo-3.webp", "sub/photo.webp"])
+        self.assertEqual(sent["caption"], "Watermarked 5 image(s).")
+
+    def test_unique_output_path(self):
+        taken = set()
+        names = [watermarker._unique_output_path(n, taken) for n in ("a.jpg", "a.png", "A.tif", "b/a.jpg")]
+        self.assertEqual(names, ["a.webp", "a-1.webp", "A-2.webp", os.path.join("b", "a") + ".webp"])
+
+    # --- Worker count: bounded by CPU and memory ---
+
+    def test_estimate_job_mb(self):
+        path = os.path.join(self.test_dir, "est.png")
+        Image.new('RGB', (4000, 3000), color='white').save(path)  # 12 MP
+        mb = watermarker._estimate_job_mb(path, 8000000)
+        self.assertAlmostEqual(mb, (12e6 * 8 + 8e6 * 56) / 2**20, places=3)
+        self.assertAlmostEqual(watermarker._estimate_job_mb(path, None), 12e6 * 64 / 2**20, places=3)
+
+    def test_estimate_job_mb_covers_measured_8mp_peak(self):
+        # Measured peak for an 8MP photo with the bot's defaults is ~435-450 MB;
+        # the estimate must not come in under it, or an extra worker gets scheduled
+        path = os.path.join(self.test_dir, "8mp.png")
+        Image.new('RGB', (3266, 2449), color='white').save(path)
+        self.assertGreater(watermarker._estimate_job_mb(path, 8000000), 450)
+        self.assertEqual(watermarker._estimate_job_mb(os.path.join(self.test_dir, "missing.png"), None), 0)
+
+    @patch('watermarker.os.cpu_count', return_value=4)
+    def test_worker_count_bounded_by_lambda_memory(self, mock_cpus):
+        # Use the estimator's own figure for an 8MP job, not a hand-picked one
+        path = os.path.join(self.test_dir, "8mp.png")
+        Image.new('RGB', (3266, 2449), color='white').save(path)
+        job_mb = watermarker._estimate_job_mb(path, 8000000)
+        cases = {"512": 1, "1024": 1, "1536": 2, "2048": 3, "10240": 4}
+        for memory, expected in cases.items():
+            with patch.dict(os.environ, {"AWS_LAMBDA_FUNCTION_MEMORY_SIZE": memory}):
+                self.assertEqual(watermarker._worker_count(job_mb), expected, memory)
+        with patch.dict(os.environ, {"AWS_LAMBDA_FUNCTION_MEMORY_SIZE": "1024"}):
+            self.assertEqual(watermarker._worker_count(200), 4)
+            # An unreadable image (estimate 0) doesn't unlock extra workers
+            self.assertEqual(watermarker._worker_count(0), 1)
+
+    @patch('watermarker._available_memory_mb', return_value=None)
+    @patch('watermarker.os.cpu_count', return_value=8)
+    def test_worker_count_sequential_when_memory_unknown(self, mock_cpus, mock_mem):
+        self.assertEqual(watermarker._worker_count(450), 1)
+
+    @patch('watermarker.os.cpu_count', return_value=2)
+    def test_worker_count_off_lambda_uses_meminfo(self, mock_cpus):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("AWS_LAMBDA_FUNCTION_MEMORY_SIZE", None)
+            meminfo = "MemTotal: 16000000 kB\nMemAvailable:     716800 kB\n"
+            with patch('builtins.open', unittest.mock.mock_open(read_data=meminfo)):
+                self.assertEqual(watermarker._available_memory_mb(), 700)
+                self.assertEqual(watermarker._worker_count(450), 1)
+
+    @patch('watermarker.tele.send_telegram')
+    @patch('watermarker._send_document')
+    @patch('watermarker._download_file')
+    def test_zip_with_only_other_files(self, mock_download, mock_send_doc, mock_send):
+        mock_download.return_value = self._make_zip("docs.zip", {"a.txt": b"x"})
+        watermarker.process_document("token", 123, {"file_id": "z", "file_name": "docs.zip"})
+        mock_send_doc.assert_not_called()
+        self.assertEqual(mock_send.call_args[0][2], "No images found in zip. Skipped 1 non-image file(s).")
+
+    # --- Image files sent as documents ---
+
+    @patch('watermarker._send_document')
+    @patch('watermarker._download_file')
+    def test_image_file_is_watermarked_and_returned_as_file(self, mock_download, mock_send_doc):
+        path = os.path.join(watermarker.TEMP_DIR, "555.jpg")
+        Image.new('RGB', (320, 240), color='orange').save(path)
+        mock_download.return_value = path
+        sent = {}
+
+        def capture(bot_token, chat_id, out_path, file_name, caption=""):
+            with Image.open(out_path) as img:
+                sent.update(format=img.format, size=img.size, name=file_name)
+
+        mock_send_doc.side_effect = capture
+        doc = {"file_id": "f", "file_name": "DSC01234.JPG", "mime_type": "image/jpeg"}
+        watermarker.process_document("token", 123, doc)
+
+        self.assertEqual(sent, {"format": "WEBP", "size": (320, 240), "name": "DSC01234.webp"})
+        self.assertEqual(os.listdir(watermarker.TEMP_DIR), [])
+
+    @patch('watermarker.tele.send_telegram')
+    def test_unsupported_document_gets_a_reply(self, mock_send):
+        doc = {"file_id": "f", "file_name": "report.pdf", "mime_type": "application/pdf"}
+        watermarker.process_document("token", 123, doc)
+        self.assertIn("Unsupported file type", mock_send.call_args[0][2])
+
+    # --- /source by uploading an image ---
+
+    @patch('watermarker.process_document')
+    @patch('watermarker.tele.send_telegram')
+    @patch('watermarker._download_file')
+    def test_source_caption_sets_watermark_from_file(self, mock_download, mock_send, mock_process_doc):
+        path = os.path.join(watermarker.TEMP_DIR, "logo.png")
+        Image.new('RGBA', (50, 20), color=(255, 0, 0, 128)).save(path)
+        mock_download.return_value = path
+        update = {"message": {"chat": {"id": 42}, "caption": "/source",
+                              "document": {"file_id": "f", "file_name": "logo.png", "mime_type": "image/png"}}}
+        watermarker.handle_update("token", update)
+
+        mock_process_doc.assert_not_called()
+        self.assertEqual(mock_send.call_args[0][2], "Watermark set successfully!")
+        with Image.open(watermarker.get_watermark_path(42)) as img:
+            self.assertEqual((img.size, img.mode), ((50, 20), "RGBA"))
+        self.assertFalse(os.path.exists(path))
+
+    @patch('watermarker.process_photo')
+    @patch('watermarker.tele.send_telegram')
+    @patch('watermarker._download_file')
+    def test_source_caption_on_photo(self, mock_download, mock_send, mock_process_photo):
+        path = os.path.join(watermarker.TEMP_DIR, "logo.jpg")
+        Image.new('RGB', (50, 20), color='red').save(path)
+        mock_download.return_value = path
+        update = {"message": {"chat": {"id": 43}, "caption": " /source ",
+                              "photo": [{"file_id": "small"}, {"file_id": "large"}]}}
+        watermarker.handle_update("token", update)
+
+        mock_process_photo.assert_not_called()
+        mock_download.assert_called_with("token", "large")
+        self.assertTrue(os.path.exists(watermarker.get_watermark_path(43)))
+
+    @patch('watermarker.tele.send_telegram')
+    @patch('watermarker._download_file')
+    def test_source_caption_rejects_non_image(self, mock_download, mock_send):
+        path = os.path.join(watermarker.TEMP_DIR, "notes.txt")
+        with open(path, "w") as f:
+            f.write("not an image")
+        mock_download.return_value = path
+        update = {"message": {"chat": {"id": 44}, "caption": "/source",
+                              "document": {"file_id": "f", "file_name": "notes.txt"}}}
+        watermarker.handle_update("token", update)
+
+        self.assertIn("isn't an image", mock_send.call_args[0][2])
+        self.assertFalse(os.path.exists(watermarker.get_watermark_path(44)))
 
 if __name__ == '__main__':
     unittest.main()
