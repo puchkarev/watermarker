@@ -58,6 +58,16 @@ For production environments, you can use the provided deployment script to fetch
     - Create and enable a systemd service if one doesn't exist.
     - Restart the service.
 
+### Serverless Deployment (AWS Lambda, on demand)
+
+If the bot is only used occasionally, it can instead run on AWS Lambda. It only runs while it handles a message, so a bot used for one batch a week costs effectively nothing. It uses the same bot code, and nothing is stored except per-chat settings.
+
+```bash
+./serverless/deploy.sh deploy
+```
+
+See [serverless/README.md](serverless/README.md) for step-by-step instructions, including how it can run alongside the server deployment above.
+
 ## Configuration
 
 Ensure `config.json` exists in the root directory with your Telegram Bot Token:
@@ -127,4 +137,5 @@ Run unit tests with:
 ```bash
 source venv/bin/activate
 python3 test_watermarker.py
+python3 serverless/test_lambda_function.py
 ```
