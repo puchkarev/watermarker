@@ -8,15 +8,18 @@ The bot runs here [bot](https://t.me/add_sun_watermark_bot)
 
 ## Features
 
--   **Set Watermark**: Use `/source <url>` to set a watermark image for the current chat.
+-   **Set Watermark**: Use `/source <url>`, or send an image with the caption `/source`, to set a watermark image for the current chat.
 -   **Customize Position**: Use `/position` to place the watermark (9 positions or tiled).
 -   **Customize Size**: Use `/size` to scale the watermark relative to the image.
 -   **Customize Angle**: Use `/angle` to rotate the watermark.
 -   **Customize Mode**: Use `/mode` to change blending mode.
 -   **Customize Strength**: Use `/strength` to set opacity.
+-   **Customize Spacing**: Use `/x_offset` and `/y_offset` to set the gap between tiled watermarks (or the margin from the edge).
+-   **Customize Quality**: Use `/quality` to set the output image quality (1-100).
 -   **Toggle Resize**: Use `/resize_8mp` to enable/disable automatic image resizing.
--   **Auto-Watermark**: Send any image to the bot, and it will reply with the watermarked version.
--   **Zip File Processing**: Send a `.zip` file containing images, and the bot will process all images (converting to WebP, 8MP max) and return a new `.zip` file.
+-   **Auto-Watermark**: Send a photo or an image file to the bot, and it will reply with the watermarked version as a file (so Telegram doesn't recompress it). Image files come back as WebP under the same name.
+-   **Zip File Processing**: Send a `.zip` file containing images, and the bot will process all images in parallel (converting to WebP, 8MP max) and return a new `.zip` file with the same name. Non-image files and macOS/Windows metadata files are left out.
+-   **Photo-Friendly**: Camera rotation (EXIF orientation) is applied so portrait shots stay upright, colour profiles (e.g. Adobe RGB) are kept, and iPhone HEIC photos are supported.
 -   **Per-Chat Config**: Each chat has its own watermark, position, and size settings.
 -   **Reset Settings**: Use `/start` to reset chat settings to defaults.
 -   **View Settings**: Use `/settings` to see current configuration.
@@ -141,6 +144,8 @@ python3 watermarker_core.py ./input_folder ./watermark.png ./output_folder
     - `negate`: Inverts the background image color where the watermark is present. Default: `negate`.
 - `--angle`: Rotation angle of the watermark in degrees (counter-clockwise). Default: `45`.
 - `--strength`: Opacity/Strength of the watermark (0.0 - 1.0). Default: `0.2`.
+- `--x-offset` / `--y-offset`: Spacing as a multiple of the watermark's width/height (1.0 = no gap). Default: `1.0`.
+- `--quality`: JPEG/WebP output quality (1 - 100). Default: `80`.
 
 ```bash
 # Example: Batch process, resize to 8MP, 15% watermark size, using difference mode and 45 degree rotation
@@ -150,16 +155,18 @@ python3 watermarker_core.py ./raw_photos ./logo.png ./processed --size 0.15 --re
 ## Usage
 
 1.  Start a chat with the bot. A `/start` command will reset your settings to default and greet you.
-2.  **Set Watermark**: `/source https://example.com/my_logo.png` (or send an image file directly)
+2.  **Set Watermark**: `/source https://example.com/my_logo.png`, or send an image with the caption `/source` (send it as a file to keep a transparent background)
 3.  **Customize Position**: `/position top left` (or top, top right, left, center, right, bottom left, bottom, bottom right, repeated)
 4.  **Customize Size**: `/size 0.1` (sets watermark to 10% of its original width)
 5.  **Customize Strength**: `/strength 0.5` (sets watermark opacity to 50%)
 6.  **Customize Angle**: `/angle 90` (rotates watermark 90 degrees counter-clockwise)
 7.  **Customize Mode**: `/mode difference` (sets blending mode)
 8.  **Toggle Resize**: `/resize_8mp false` (disables 8MP resizing)
-9.  **View Settings**: `/settings` (shows current configuration)
-10. **Get Help**: `/help`
-11. **Apply**: Send an image (photo) to the bot, or a **.zip file containing images** (all images will be watermarked, converted to WebP, and resized to 8MP if `resize_8mp` is true). The bot will reply with the watermarked version or a processed zip file.
+9.  **Customize Spacing**: `/x_offset 2.0` and `/y_offset 2.0` (gap between tiles as a multiple of the watermark size; 1.0 = no gap)
+10. **Customize Quality**: `/quality 90` (higher is sharper but larger files; default 80)
+11. **View Settings**: `/settings` (shows current configuration)
+12. **Get Help**: `/help`
+13. **Apply**: Send a photo, an image file, or a **.zip file containing images** (all images will be watermarked, converted to WebP, and resized to 8MP if `resize_8mp` is true). The bot replies with the watermarked file or a processed zip file. Send images as files rather than photos for full quality.
 
 ## Testing
 

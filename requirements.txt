@@ -1,4 +1,6 @@
 Pillow
 requests
+# Lets the bot read iPhone HEIC/HEIF photos (the bot still runs without it, minus HEIC)
+pillow-heif
 # Used by the telegram submodule to send photos and set the command menu
 python-telegram-bot==22.0

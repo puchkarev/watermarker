@@ -1,9 +1,23 @@
 import argparse
 import sys
 import os
-from PIL import Image, ImageChops
+from PIL import Image, ImageChops, ImageOps
 
-def apply_watermark(base_image_path, watermark_path="sun.webp", output_path="output.webp", position="bottom right", size=0.25, max_pixels=None, mode="standard", angle=0, strength=1.0, x_offset=1.0, y_offset=1.0):
+try:
+    # Lets Pillow open iPhone HEIC/HEIF photos when pillow-heif is installed
+    from pillow_heif import register_heif_opener
+    register_heif_opener()
+    HEIF_SUPPORTED = True
+except ImportError:
+    HEIF_SUPPORTED = False
+
+SUPPORTED_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tiff"}
+if HEIF_SUPPORTED:
+    SUPPORTED_EXTS |= {".heic", ".heif"}
+
+DEFAULT_QUALITY = 80
+
+def apply_watermark(base_image_path, watermark_path="sun.webp", output_path="output.webp", position="bottom right", size=0.25, max_pixels=None, mode="standard", angle=0, strength=1.0, x_offset=1.0, y_offset=1.0, quality=DEFAULT_QUALITY):
     """
     Applies a watermark to an image.
     
@@ -22,12 +36,24 @@ def apply_watermark(base_image_path, watermark_path="sun.webp", output_path="out
         x_offset (float): Horizontal spacing as a multiple of the watermark width
             (1.0 = no gap between tiles / flush with the edge).
         y_offset (float): Vertical spacing as a multiple of the watermark height.
+        quality (int): Encoder quality for JPEG/WebP output (1 - 100).
     
     Returns:
         bool: True if successful, False otherwise.
     """
     try:
-        base = Image.open(base_image_path).convert("RGBA")
+        with Image.open(base_image_path) as source:
+            # Keep the colour profile (e.g. Adobe RGB, Display P3) so colours don't shift
+            icc_profile = source.info.get("icc_profile")
+            # Cameras and phones often store portrait shots sideways plus a rotate tag;
+            # apply the rotation, since the tag isn't carried into the output
+            try:
+                upright = ImageOps.exif_transpose(source)
+            except Exception as e:
+                # A damaged EXIF block shouldn't stop the photo being watermarked
+                print(f"Ignoring unreadable EXIF orientation in {base_image_path}: {e}")
+                upright = source
+            base = upright.convert("RGBA")
         
         # Resize if max_pixels is set and image is larger
         if max_pixels:
@@ -78,13 +104,13 @@ def apply_watermark(base_image_path, watermark_path="sun.webp", output_path="out
         if position == "repeated":
             # Tile the watermark with brick offset
             row_index = 0
-            for y in range(0, base.height, target_height + y_padding):
+            for y in range(0, base.height, max(1, target_height + y_padding)):
                 offset = 0
                 if row_index % 2 == 1:
                     offset = (target_width + x_padding) // 2
                 
                 # Start x from -offset to ensure coverage on the left
-                for x in range(-offset, base.width, target_width + x_padding):
+                for x in range(-offset, base.width, max(1, target_width + x_padding)):
                     positions.append((x, y))
                 row_index += 1
         else:
@@ -170,10 +196,15 @@ def apply_watermark(base_image_path, watermark_path="sun.webp", output_path="out
         # If output path implies a specific format, use it.
         # But if we want to ensure webp in batch mode, the extension is already set in output_path.
         
-        if output_path.lower().endswith(".jpg") or output_path.lower().endswith(".jpeg"):
+        save_options = {}
+        if icc_profile:
+            save_options["icc_profile"] = icc_profile
+        if output_path.lower().endswith((".jpg", ".jpeg", ".webp")):
+            save_options["quality"] = quality
+        if output_path.lower().endswith((".jpg", ".jpeg")):
             result = result.convert("RGB")
-        
-        result.save(output_path)
+
+        result.save(output_path, **save_options)
         return True
     except Exception as e:
         print(f"Error applying watermark: {e}")
@@ -194,6 +225,9 @@ def main():
                         help="Watermark blending mode. 'standard' (overlay), 'difference' (color diff), or 'negate' (inversion).")
     parser.add_argument("--angle", type=float, default=0, help="Rotation angle of the watermark in degrees.")
     parser.add_argument("--strength", type=float, default=1.0, help="Watermark strength/opacity (0.0 - 1.0).")
+    parser.add_argument("--x-offset", type=float, default=1.0, help="Horizontal spacing as a multiple of the watermark width.")
+    parser.add_argument("--y-offset", type=float, default=1.0, help="Vertical spacing as a multiple of the watermark height.")
+    parser.add_argument("--quality", type=int, default=DEFAULT_QUALITY, help="JPEG/WebP output quality (1 - 100).")
 
     args = parser.parse_args()
     
@@ -208,19 +242,18 @@ def main():
                 print(f"Error creating output directory: {e}")
                 sys.exit(1)
                 
-        supported_exts = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tiff"}
         processed_count = 0
         
         for filename in os.listdir(args.base_image):
             ext = os.path.splitext(filename)[1].lower()
-            if ext in supported_exts:
+            if ext in SUPPORTED_EXTS:
                 input_path = os.path.join(args.base_image, filename)
                 # Feature: Change encoding to webp for batch processing
                 output_filename = os.path.splitext(filename)[0] + ".webp"
                 output_path = os.path.join(args.output_image, output_filename)
                 
                 print(f"Processing {filename} -> {output_filename}...")
-                if apply_watermark(input_path, args.watermark_image, output_path, args.position, args.size, max_pixels, args.mode, args.angle, args.strength):
+                if apply_watermark(input_path, args.watermark_image, output_path, args.position, args.size, max_pixels, args.mode, args.angle, args.strength, args.x_offset, args.y_offset, args.quality):
                     processed_count += 1
                 else:
                     print(f"Failed to process {filename}")
@@ -230,7 +263,7 @@ def main():
 
     else:
         # Single file processing
-        if apply_watermark(args.base_image, args.watermark_image, args.output_image, args.position, args.size, max_pixels, args.mode, args.angle, args.strength):
+        if apply_watermark(args.base_image, args.watermark_image, args.output_image, args.position, args.size, max_pixels, args.mode, args.angle, args.strength, args.x_offset, args.y_offset, args.quality):
             print(f"Successfully saved to {args.output_image}")
             sys.exit(0)
         else:
