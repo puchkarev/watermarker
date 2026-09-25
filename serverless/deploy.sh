@@ -15,7 +15,7 @@
 # Options:
 #   --bot-token TOKEN        Telegram bot token (asked for on first deploy; kept on later deploys)
 #   --allowed-chat-ids IDS   comma-separated chat ids allowed to use the bot ("" allows everyone)
-#   --memory MB              Lambda memory, 512-10240 (default 2048)
+#   --memory MB              Lambda memory, 1024-10240 (default 2048)
 #   --stack-name NAME        CloudFormation stack and function name (default watermarker-bot)
 #   --region REGION          AWS region (default: your AWS CLI default region)
 #   -h, --help               show this help
