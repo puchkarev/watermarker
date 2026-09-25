@@ -22,6 +22,20 @@ WATERMARKS_DIR = "watermarks"
 TEMP_DIR = "temp"
 SETTINGS_DIR = "settings"
 
+# Commands shown in Telegram's command menu (also used by the serverless deployment)
+BOT_COMMANDS = {
+    "start": "Reset settings and show welcome message",
+    "settings": "Show current watermark settings",
+    "source": "Set the watermark image URL",
+    "position": "Set watermark position",
+    "size": "Set watermark size (fraction of original watermark width)",
+    "strength": "Set watermark opacity (0.0 - 1.0)",
+    "angle": "Set watermark rotation angle (0-360)",
+    "mode": "Set watermark blending mode",
+    "resize_8mp": "Toggle 8MP resize for output images",
+    "help": "Show available commands"
+}
+
 def load_config():
     with open("config.json", "r") as f:
         return json.load(f)
@@ -485,19 +499,7 @@ def main():
         return
     
     # Set bot commands
-    commands = {
-        "start": "Reset settings and show welcome message",
-        "settings": "Show current watermark settings",
-        "source": "Set the watermark image URL",
-        "position": "Set watermark position",
-        "size": "Set watermark size (fraction of original watermark width)",
-        "strength": "Set watermark opacity (0.0 - 1.0)",
-        "angle": "Set watermark rotation angle (0-360)",
-        "mode": "Set watermark blending mode",
-        "resize_8mp": "Toggle 8MP resize for output images",
-        "help": "Show available commands"
-    }
-    tele.telegram_set_commands(bot_token, commands)
+    tele.telegram_set_commands(bot_token, BOT_COMMANDS)
 
     print("Bot started...")
     last_update_id = 0

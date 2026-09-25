@@ -1,0 +1,129 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Watermarker Telegram bot, on demand: a Lambda Function URL receives Telegram
+  webhooks and the same function watermarks photos/zips asynchronously. Only
+  per-chat configuration is persisted (tiny objects in S3).
+
+Parameters:
+  BotToken:
+    Type: String
+    NoEcho: true
+    Description: Telegram bot token from @BotFather
+  WebhookSecret:
+    Type: String
+    NoEcho: true
+    AllowedPattern: "[A-Za-z0-9_-]{16,256}"
+    Description: Random secret Telegram sends with each webhook call
+  AllowedChatIds:
+    Type: String
+    Default: ""
+    Description: Optional comma-separated chat ids allowed to use the bot (empty = anyone)
+  MemorySize:
+    Type: Number
+    Default: 2048
+    MinValue: 512
+    MaxValue: 10240
+    Description: Lambda memory in MB (CPU scales with it)
+
+Resources:
+  StateBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  FunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: watermarker
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [s3:GetObject, s3:PutObject, s3:DeleteObject]
+                Resource: !Sub ${StateBucket.Arn}/*
+              # Lets a missing object read as 404 (no settings yet) instead of 403
+              - Effect: Allow
+                Action: s3:ListBucket
+                Resource: !GetAtt StateBucket.Arn
+              # The receiver hands each update to itself asynchronously
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${AWS::StackName}
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${AWS::StackName}
+      RetentionInDays: 14
+
+  Function:
+    Type: AWS::Lambda::Function
+    DependsOn: LogGroup
+    Properties:
+      FunctionName: !Ref AWS::StackName
+      Runtime: python3.12
+      Architectures: [arm64]
+      Handler: lambda_function.handler
+      Role: !GetAtt FunctionRole.Arn
+      MemorySize: !Ref MemorySize
+      Timeout: 900
+      EphemeralStorage:
+        Size: 2048
+      Environment:
+        Variables:
+          BOT_TOKEN: !Ref BotToken
+          WEBHOOK_SECRET: !Ref WebhookSecret
+          STATE_BUCKET: !Ref StateBucket
+          ALLOWED_CHAT_IDS: !Ref AllowedChatIds
+      # Placeholder: deploy.sh uploads the real package right after the stack deploys
+      Code:
+        ZipFile: |
+          def handler(event, context):
+              return {"statusCode": 503, "body": "not deployed yet"}
+
+  # A failed or timed-out worker must not run again: it would re-send results
+  AsyncConfig:
+    Type: AWS::Lambda::EventInvokeConfig
+    Properties:
+      FunctionName: !Ref Function
+      Qualifier: $LATEST
+      MaximumRetryAttempts: 0
+      MaximumEventAgeInSeconds: 3600
+
+  FunctionUrl:
+    Type: AWS::Lambda::Url
+    Properties:
+      TargetFunctionArn: !GetAtt Function.Arn
+      AuthType: NONE
+
+  # Telegram can't sign requests; the webhook secret header is checked in code instead
+  FunctionUrlPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref Function
+      Action: lambda:InvokeFunctionUrl
+      Principal: "*"
+      FunctionUrlAuthType: NONE
+
+Outputs:
+  FunctionName:
+    Value: !Ref Function
+  WebhookUrl:
+    Value: !GetAtt FunctionUrl.FunctionUrl
+  StateBucketName:
+    Value: !Ref StateBucket

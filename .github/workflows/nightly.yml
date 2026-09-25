@@ -31,6 +31,7 @@ jobs:
     - name: Run tests
       run: |
         python test_watermarker.py
+        python serverless/test_lambda_function.py
 
     - name: Check for changes and Create Release
       env:

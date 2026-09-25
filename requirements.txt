@@ -1,2 +1,4 @@
 Pillow
 requests
+# Used by the telegram submodule to send photos and set the command menu
+python-telegram-bot==22.0

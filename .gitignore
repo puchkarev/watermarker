@@ -212,3 +212,6 @@ watermarks/
 temp/
 settings/
 test_data/
+
+# Serverless build output
+serverless/build/
