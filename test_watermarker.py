@@ -880,6 +880,53 @@ class TestWatermarker(unittest.TestCase):
             self.assertEqual(img.size, (200, 100))
         self.assertIn(".heic", SUPPORTED_EXTS)
 
+    # --- apply_watermark signature and CLI ---
+
+    def test_apply_watermark_options_are_keyword_only(self):
+        path = os.path.join(self.test_dir, "base.png")
+        Image.new('RGB', (100, 100), color='white').save(path)
+        out = os.path.join(self.test_dir, "kw.webp")
+        # A positional option would let two bare numbers be swapped silently
+        with self.assertRaises(TypeError):
+            apply_watermark(path, self._wm(), out, "center")
+        self.assertTrue(apply_watermark(path, self._wm(), out, position="center", size=0.2))
+
+    def _run_cli(self, *argv):
+        import watermarker_core
+        with patch.object(sys, 'argv', ['watermarker_core.py', *argv]), \
+             patch('watermarker_core.apply_watermark', wraps=watermarker_core.apply_watermark) as spy:
+            with self.assertRaises(SystemExit) as ctx:
+                watermarker_core.main()
+        return ctx.exception.code, spy
+
+    def test_cli_single_file_passes_every_option_by_name(self):
+        path = os.path.join(self.test_dir, "cli.png")
+        Image.new('RGB', (300, 200), color='white').save(path)
+        out = os.path.join(self.test_dir, "cli.webp")
+        code, spy = self._run_cli(path, self._wm(), out, "--position", "repeated", "--size", "0.3",
+                                  "--mode", "difference", "--angle", "30", "--strength", "0.6",
+                                  "--x-offset", "2.5", "--y-offset", "1.5", "--quality", "90", "--resize-8mp")
+        self.assertEqual(code, 0)
+        self.assertTrue(os.path.exists(out))
+        self.assertEqual(spy.call_args.args, (path, self._wm(), out))
+        self.assertEqual(spy.call_args.kwargs, dict(position="repeated", size=0.3, max_pixels=8000000,
+                                                    mode="difference", angle=30.0, strength=0.6,
+                                                    x_offset=2.5, y_offset=1.5, quality=90))
+
+    def test_cli_batch_passes_options_by_name(self):
+        in_dir = os.path.join(self.test_dir, "batch_in")
+        out_dir = os.path.join(self.test_dir, "batch_out")
+        os.makedirs(in_dir)
+        for name in ("a.jpg", "b.png"):
+            Image.new('RGB', (120, 80), color='white').save(os.path.join(in_dir, name))
+        code, spy = self._run_cli(in_dir, self._wm(), out_dir, "--quality", "70", "--x-offset", "2.0")
+        self.assertEqual(code, 0)
+        self.assertEqual(sorted(os.listdir(out_dir)), ["a.webp", "b.webp"])
+        self.assertEqual(spy.call_count, 2)
+        for call in spy.call_args_list:
+            self.assertEqual(len(call.args), 3)
+            self.assertEqual((call.kwargs["quality"], call.kwargs["x_offset"]), (70, 2.0))
+
     # --- New commands ---
 
     @patch('watermarker.tele.send_telegram')
