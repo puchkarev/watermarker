@@ -15,7 +15,7 @@ from PIL import Image
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import lambda_function
 import watermarker
-from quota import DailyQuota
+from quota import ImageQuota
 
 SECRET = "test-secret-0123456789"
 FREE_CHAT = 111
@@ -55,12 +55,12 @@ class Clock:
 
 
 def _quota(db, clock=None, free=10, system=5000):
-    return DailyQuota(db, "table", free_daily=free, system_daily=system,
+    return ImageQuota(db, "table", free_monthly=free, system_daily=system,
                       unlimited_chat_ids={str(UNLIMITED_CHAT)},
                       now=clock or Clock(datetime(2026, 9, 26, 22, 30, tzinfo=timezone.utc)))
 
 
-class TestDailyQuota(unittest.TestCase):
+class TestImageQuota(unittest.TestCase):
 
     def setUp(self):
         self.db = FakeDynamo()
@@ -69,38 +69,38 @@ class TestDailyQuota(unittest.TestCase):
     def test_counts_images_per_chat_and_system(self):
         self.assertIsNone(self.quota.reserve(FREE_CHAT, 4))
         self.assertIsNone(self.quota.reserve(FREE_CHAT, 6))
-        self.assertEqual(self.db.total(f"chat#{FREE_CHAT}#2026-09-26"), 10)
+        self.assertEqual(self.db.total(f"chat#{FREE_CHAT}#2026-09"), 10)
         self.assertEqual(self.db.total("system#2026-09-26"), 10)
 
     def test_personal_limit_names_the_user_quota(self):
         self.quota.reserve(FREE_CHAT, 10)
         message = self.quota.reserve(FREE_CHAT, 1)
-        self.assertEqual(message, "Daily limit reached: you've used 10 of your 10 images today. "
-                                  "Your allowance resets at 00:00 UTC (in 1h 30m).")
+        self.assertEqual(message, "Monthly limit reached: you've used 10 of your 10 images this month. "
+                                  "Your allowance resets at 00:00 UTC on 1 October (in 4d 1h).")
         # The refused request took nothing
-        self.assertEqual(self.db.total(f"chat#{FREE_CHAT}#2026-09-26"), 10)
+        self.assertEqual(self.db.total(f"chat#{FREE_CHAT}#2026-09"), 10)
         self.assertEqual(self.db.total("system#2026-09-26"), 10)
 
     def test_batch_bigger_than_what_is_left_is_refused_whole(self):
         self.quota.reserve(FREE_CHAT, 7)
         message = self.quota.reserve(FREE_CHAT, 5)
-        self.assertEqual(message, "That zip contains 5 images, but you have 3 of your 10 left today. "
-                                  "Nothing was processed - your allowance resets at 00:00 UTC (in 1h 30m).")
-        self.assertEqual(self.db.total(f"chat#{FREE_CHAT}#2026-09-26"), 7)
+        self.assertEqual(message, "That zip contains 5 images, but you have 3 of your 10 left this month. "
+                                  "Nothing was processed - your allowance resets at 00:00 UTC on 1 October (in 4d 1h).")
+        self.assertEqual(self.db.total(f"chat#{FREE_CHAT}#2026-09"), 7)
         self.assertEqual(self.db.total("system#2026-09-26"), 7)
 
     def test_batch_bigger_than_the_whole_allowance_says_so(self):
-        # Retrying tomorrow wouldn't help, so the message doesn't suggest it
+        # Retrying next month wouldn't help, so the message doesn't suggest it
         message = self.quota.reserve(FREE_CHAT, 20)
-        self.assertEqual(message, "That zip contains 20 images, which is more than your daily allowance of 10. "
+        self.assertEqual(message, "That zip contains 20 images, which is more than your monthly allowance of 10. "
                                   "Try splitting it into smaller zips.")
-        self.assertEqual(self.db.total(f"chat#{FREE_CHAT}#2026-09-26"), 0)
+        self.assertEqual(self.db.total(f"chat#{FREE_CHAT}#2026-09"), 0)
         self.assertEqual(self.db.total("system#2026-09-26"), 0)
 
     def test_unlimited_chat_skips_personal_limit_but_not_system(self):
         quota = _quota(self.db, system=50)
         self.assertIsNone(quota.reserve(UNLIMITED_CHAT, 40))
-        self.assertNotIn(f"chat#{UNLIMITED_CHAT}#2026-09-26", self.db.items)
+        self.assertNotIn(f"chat#{UNLIMITED_CHAT}#2026-09", self.db.items)
         message = quota.reserve(UNLIMITED_CHAT, 20)
         self.assertIn("across all users", message)
         self.assertNotIn("your 10 images", message)
@@ -118,7 +118,7 @@ class TestDailyQuota(unittest.TestCase):
                          "The bot has reached its daily limit of 12 images across all users. "
                          "Please try again after 00:00 UTC (in 1h 30m).")
         # A free chat blocked by the system limit doesn't lose personal allowance
-        self.assertEqual(self.db.total(f"chat#{FREE_CHAT}#2026-09-26"), 0)
+        self.assertEqual(self.db.total(f"chat#{FREE_CHAT}#2026-09"), 0)
 
     def test_messages_use_configured_limits(self):
         quota = _quota(self.db, free=3, system=7)
@@ -130,38 +130,64 @@ class TestDailyQuota(unittest.TestCase):
     def test_release_refunds_both_counters(self):
         self.quota.reserve(FREE_CHAT, 10)
         self.quota.release(FREE_CHAT, 4)
-        self.assertEqual(self.db.total(f"chat#{FREE_CHAT}#2026-09-26"), 6)
+        self.assertEqual(self.db.total(f"chat#{FREE_CHAT}#2026-09"), 6)
         self.assertEqual(self.db.total("system#2026-09-26"), 6)
         self.assertIsNone(self.quota.reserve(FREE_CHAT, 4))
 
-    def test_day_rolls_over_at_utc_midnight(self):
+    def test_personal_allowance_is_per_month_not_per_day(self):
         clock = Clock(datetime(2026, 9, 26, 23, 59, tzinfo=timezone.utc))
         quota = _quota(self.db, clock)
         quota.reserve(FREE_CHAT, 10)
         self.assertIsNotNone(quota.reserve(FREE_CHAT, 1))
+        # Midnight starts a new system day but not a new personal allowance
         clock.when = datetime(2026, 9, 27, 0, 0, 1, tzinfo=timezone.utc)
+        self.assertIn("Monthly limit reached", quota.reserve(FREE_CHAT, 1))
+        self.assertIsNone(quota.reserve(UNLIMITED_CHAT, 5))
+        self.assertEqual(self.db.total("system#2026-09-27"), 5)
+
+    def test_personal_allowance_rolls_over_at_the_start_of_the_utc_month(self):
+        clock = Clock(datetime(2026, 9, 30, 23, 59, tzinfo=timezone.utc))
+        quota = _quota(self.db, clock)
+        quota.reserve(FREE_CHAT, 10)
+        self.assertIsNotNone(quota.reserve(FREE_CHAT, 1))
+        clock.when = datetime(2026, 10, 1, 0, 0, 1, tzinfo=timezone.utc)
         self.assertIsNone(quota.reserve(FREE_CHAT, 10))
-        self.assertEqual(self.db.total(f"chat#{FREE_CHAT}#2026-09-27"), 10)
+        self.assertEqual(self.db.total(f"chat#{FREE_CHAT}#2026-10"), 10)
+        self.assertEqual(self.db.total("system#2026-10-01"), 10)
 
     def test_release_after_midnight_settles_the_reservation_day(self):
         # A zip reserved at 23:50 can still be running at 00:05
         clock = Clock(datetime(2026, 9, 26, 23, 50, tzinfo=timezone.utc))
-        quota = _quota(self.db, clock)
+        quota = _quota(self.db, clock, system=20)
         self.assertIsNone(quota.reserve(FREE_CHAT, 5))
         clock.when = datetime(2026, 9, 27, 0, 5, tzinfo=timezone.utc)
         quota.release(FREE_CHAT, 5)
-        self.assertEqual(self.db.total(f"chat#{FREE_CHAT}#2026-09-26"), 0)
+        self.assertEqual(self.db.total(f"chat#{FREE_CHAT}#2026-09"), 0)
         self.assertEqual(self.db.total("system#2026-09-26"), 0)
-        # The new day is untouched: no bonus allowance, no lowered system count
-        self.assertEqual(self.db.total(f"chat#{FREE_CHAT}#2026-09-27"), 0)
+        # The new day's system count isn't lowered, so it still caps at 20
         self.assertEqual(self.db.total("system#2026-09-27"), 0)
+        self.assertIsNone(quota.reserve(UNLIMITED_CHAT, 20))
+        self.assertIsNotNone(quota.reserve(UNLIMITED_CHAT, 1))
+
+    def test_release_after_month_end_settles_the_reservation_month_and_day(self):
+        # A zip reserved at 23:55 on the last day of the month crosses both boundaries at once
+        clock = Clock(datetime(2026, 9, 30, 23, 55, tzinfo=timezone.utc))
+        quota = _quota(self.db, clock, system=20)
+        self.assertIsNone(quota.reserve(FREE_CHAT, 8))
+        clock.when = datetime(2026, 10, 1, 0, 5, tzinfo=timezone.utc)
+        quota.release(FREE_CHAT, 3)
+        self.assertEqual(self.db.total(f"chat#{FREE_CHAT}#2026-09"), 5)
+        self.assertEqual(self.db.total("system#2026-09-30"), 5)
+        # The new month and day are untouched: no bonus allowance, no lowered system count
+        self.assertNotIn(f"chat#{FREE_CHAT}#2026-10", self.db.items)
+        self.assertNotIn("system#2026-10-01", self.db.items)
         self.assertIsNone(quota.reserve(FREE_CHAT, 10))
         self.assertIsNotNone(quota.reserve(FREE_CHAT, 1))
 
     def test_refunds_never_take_a_counter_below_zero(self):
         self.quota.reserve(FREE_CHAT, 2)
         self.quota.release(FREE_CHAT, 5)
-        self.assertEqual(self.db.total(f"chat#{FREE_CHAT}#2026-09-26"), 0)
+        self.assertEqual(self.db.total(f"chat#{FREE_CHAT}#2026-09"), 0)
         self.assertEqual(self.db.total("system#2026-09-26"), 0)
 
     def test_failed_refund_is_logged_not_raised_and_other_refund_still_runs(self):
@@ -177,14 +203,14 @@ class TestDailyQuota(unittest.TestCase):
         quota.reserve(FREE_CHAT, 10)
         with patch("builtins.print") as mock_print:
             message = quota.reserve(FREE_CHAT, 3)
-        self.assertIn("Daily limit reached", message)
+        self.assertIn("Monthly limit reached", message)
         self.assertTrue(any("quota refund failed" in str(c) for c in mock_print.call_args_list))
         # The chat refund failed, but the system refund still ran
         self.assertEqual(db.total("system#2026-09-26"), 10)
 
     def test_zero_free_allowance_messages(self):
         quota = _quota(self.db, free=0)
-        message = "This bot has no daily image allowance for your chat."
+        message = "This bot has no free image allowance for your chat."
         self.assertEqual(quota.reserve(FREE_CHAT, 1), message)
         self.assertEqual(quota.reserve(FREE_CHAT, 20), message)
         self.assertEqual(quota.check(FREE_CHAT), message)
@@ -196,17 +222,35 @@ class TestDailyQuota(unittest.TestCase):
         self.assertEqual(quota.reserve(UNLIMITED_CHAT, 1), message)
         self.assertEqual(quota.check(FREE_CHAT), message)
 
-    def test_rows_expire_after_their_day(self):
+    def test_rows_expire_after_the_period_following_their_own(self):
         self.quota.reserve(FREE_CHAT, 1)
-        expires = self.db.items[f"chat#{FREE_CHAT}#2026-09-26"]["expires_at"]
-        self.assertEqual(expires, int(datetime(2026, 9, 28, tzinfo=timezone.utc).timestamp()))
+        chat_expires = self.db.items[f"chat#{FREE_CHAT}#2026-09"]["expires_at"]
+        system_expires = self.db.items["system#2026-09-26"]["expires_at"]
+        self.assertEqual(chat_expires, int(datetime(2026, 11, 1, tzinfo=timezone.utc).timestamp()))
+        self.assertEqual(system_expires, int(datetime(2026, 9, 28, tzinfo=timezone.utc).timestamp()))
+
+    def test_december_rows_expire_in_the_new_year(self):
+        quota = _quota(self.db, Clock(datetime(2026, 12, 31, 12, 0, tzinfo=timezone.utc)))
+        quota.reserve(FREE_CHAT, 1)
+        self.assertEqual(self.db.items[f"chat#{FREE_CHAT}#2026-12"]["expires_at"],
+                         int(datetime(2027, 2, 1, tzinfo=timezone.utc).timestamp()))
+        self.assertEqual(self.db.items["system#2026-12-31"]["expires_at"],
+                         int(datetime(2027, 1, 2, tzinfo=timezone.utc).timestamp()))
+
+    def test_reset_hint_counts_down_to_the_next_month(self):
+        quota = _quota(self.db, Clock(datetime(2026, 12, 31, 22, 30, tzinfo=timezone.utc)))
+        quota.reserve(FREE_CHAT, 10)
+        self.assertIn("resets at 00:00 UTC on 1 January (in 1h 30m)", quota.reserve(FREE_CHAT, 1))
+        quota = _quota(self.db, Clock(datetime(2026, 2, 1, 0, 0, tzinfo=timezone.utc)))
+        quota.reserve(FREE_CHAT, 10)
+        self.assertIn("resets at 00:00 UTC on 1 March (in 28d 0h)", quota.reserve(FREE_CHAT, 1))
 
     def test_check_reports_only_exhausted_allowance(self):
         self.assertIsNone(self.quota.check(FREE_CHAT))
         self.quota.reserve(FREE_CHAT, 9)
         self.assertIsNone(self.quota.check(FREE_CHAT))
         self.quota.reserve(FREE_CHAT, 1)
-        self.assertIn("Daily limit reached", self.quota.check(FREE_CHAT))
+        self.assertIn("Monthly limit reached", self.quota.check(FREE_CHAT))
         self.assertIsNone(self.quota.check(UNLIMITED_CHAT))
 
     def test_concurrent_reservations_never_lose_counts_or_overshoot(self):
@@ -228,7 +272,7 @@ class TestDailyQuota(unittest.TestCase):
         self.assertEqual(len(granted), 400)  # every chat gets exactly its 10
         self.assertEqual(self.db.total("system#2026-09-26"), 400)
         for i in range(40):
-            self.assertEqual(self.db.total(f"chat#{1000 + i}#2026-09-26"), 10)
+            self.assertEqual(self.db.total(f"chat#{1000 + i}#2026-09"), 10)
 
     def test_concurrent_reservations_hold_the_system_cap(self):
         quota = _quota(self.db, system=100)
@@ -294,7 +338,7 @@ class TestQuotaInTheBot(unittest.TestCase):
         return path
 
     def _chat_total(self, chat=FREE_CHAT):
-        return self.db.total(f"chat#{chat}#2026-09-26")
+        return self.db.total(f"chat#{chat}#2026-09")
 
     def test_zip_of_n_images_counts_n(self):
         entries = {f"{i}.png": _png() for i in range(6)}
@@ -325,7 +369,7 @@ class TestQuotaInTheBot(unittest.TestCase):
             watermarker.process_document("t", FREE_CHAT, {"file_id": "z", "file_name": "b.zip"})
         apply.assert_not_called()
         self.assertEqual(self.sent_docs, [])
-        self.assertIn("That zip contains 5 images, but you have 3 of your 10 left today", self.messages[-1])
+        self.assertIn("That zip contains 5 images, but you have 3 of your 10 left this month", self.messages[-1])
         self.assertEqual(self._chat_total(), 7)
         self.assertEqual(os.listdir(watermarker.TEMP_DIR), [])
 
@@ -363,7 +407,7 @@ class TestQuotaInTheLambda(unittest.TestCase):
     def setUp(self):
         self.env = patch.dict(os.environ, {
             "BOT_TOKEN": "bot-token", "WEBHOOK_SECRET": SECRET, "STATE_BUCKET": "bucket",
-            "QUOTA_TABLE": "quota", "FREE_DAILY_IMAGES": "10", "SYSTEM_DAILY_IMAGES": "5000",
+            "QUOTA_TABLE": "quota", "FREE_MONTHLY_IMAGES": "10", "SYSTEM_DAILY_IMAGES": "5000",
             "UNLIMITED_CHAT_IDS": str(UNLIMITED_CHAT), "ALLOWED_CHAT_IDS": "",
         })
         self.env.start()
@@ -382,8 +426,8 @@ class TestQuotaInTheLambda(unittest.TestCase):
         return {"headers": {"x-telegram-bot-api-secret-token": SECRET}, "body": body}
 
     def _exhaust(self, chat):
-        day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        self.db.items[f"chat#{chat}#{day}"] = {"images": 10, "expires_at": 0}
+        month = datetime.now(timezone.utc).strftime("%Y-%m")
+        self.db.items[f"chat#{chat}#{month}"] = {"images": 10, "expires_at": 0}
 
     @patch("watermarker.tele.send_telegram")
     def test_receiver_refuses_exhausted_chat_without_starting_a_worker(self, mock_send):
@@ -391,7 +435,7 @@ class TestQuotaInTheLambda(unittest.TestCase):
         result = lambda_function.handler(self._event({"chat": FREE_CHAT, "photo": [{"file_id": "p"}]}), self.context)
         self.assertEqual(result["statusCode"], 200)
         self.lambda_client.invoke.assert_not_called()
-        self.assertIn("Daily limit reached", mock_send.call_args[0][2])
+        self.assertIn("Monthly limit reached", mock_send.call_args[0][2])
 
     def test_receiver_lets_commands_and_source_uploads_through(self):
         self._exhaust(FREE_CHAT)
@@ -430,7 +474,18 @@ class TestQuotaInTheLambda(unittest.TestCase):
         with patch.dict(os.environ, {"QUOTA_TABLE": ""}):
             self.assertIsNone(lambda_function._quota())
         quota = lambda_function._quota()
-        self.assertEqual((quota.free_daily, quota.system_daily, quota.unlimited), (10, 5000, {str(UNLIMITED_CHAT)}))
+        self.assertEqual((quota.free_monthly, quota.system_daily, quota.unlimited), (10, 5000, {str(UNLIMITED_CHAT)}))
+
+    def test_deprecated_free_daily_name_is_still_read_and_logged(self):
+        with patch.dict(os.environ, {"FREE_MONTHLY_IMAGES": "", "FREE_DAILY_IMAGES": "25"}), \
+             patch("builtins.print") as mock_print:
+            self.assertEqual(lambda_function._quota().free_monthly, 25)
+        self.assertTrue(any("FREE_DAILY_IMAGES is deprecated" in str(c) for c in mock_print.call_args_list))
+        # The new name wins, silently
+        with patch.dict(os.environ, {"FREE_MONTHLY_IMAGES": "7", "FREE_DAILY_IMAGES": "25"}), \
+             patch("builtins.print") as mock_print:
+            self.assertEqual(lambda_function._quota().free_monthly, 7)
+        mock_print.assert_not_called()
 
 
 if __name__ == "__main__":

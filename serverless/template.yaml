@@ -17,12 +17,12 @@ Parameters:
   UnlimitedChatIds:
     Type: String
     Default: ""
-    Description: Comma-separated chat ids with no personal daily limit (the system limit still applies)
-  FreeDailyImages:
+    Description: Comma-separated chat ids with no personal monthly limit (the system limit still applies)
+  FreeMonthlyImages:
     Type: Number
     Default: 10
     MinValue: 0
-    Description: Images per UTC day for every other chat
+    Description: Images per UTC calendar month for every other chat
   SystemDailyImages:
     Type: Number
     Default: 5000
@@ -53,7 +53,7 @@ Resources:
         IgnorePublicAcls: true
         RestrictPublicBuckets: true
 
-  # Daily image counters (see serverless/quota.py). Rows expire on their own via TTL.
+  # Image counters (see serverless/quota.py). Rows expire on their own via TTL.
   QuotaTable:
     Type: AWS::DynamoDB::Table
     Properties:
@@ -127,7 +127,7 @@ Resources:
           ALLOWED_CHAT_IDS: !Ref AllowedChatIds
           QUOTA_TABLE: !Ref QuotaTable
           UNLIMITED_CHAT_IDS: !Ref UnlimitedChatIds
-          FREE_DAILY_IMAGES: !Ref FreeDailyImages
+          FREE_MONTHLY_IMAGES: !Ref FreeMonthlyImages
           SYSTEM_DAILY_IMAGES: !Ref SystemDailyImages
       # Placeholder: deploy.sh uploads the real package right after the stack deploys
       Code:

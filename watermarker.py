@@ -390,7 +390,7 @@ def process_text(bot_token, chat_id, text):
 
 NO_WATERMARK_MESSAGE = "No watermark set and default 'sun.webp' not found. Use /source <url> to set one."
 
-# Optional daily image quota. The serverless deployment installs one (see
+# Optional image quota. The serverless deployment installs one (see
 # serverless/quota.py); left as None, as on a server, nothing is counted.
 # It needs reserve(chat_id, n) -> refusal message or None, and release(chat_id, n).
 QUOTA = None
@@ -541,7 +541,7 @@ def _process_zip(bot_token, chat_id, file_id, file_name):
                 os.makedirs(os.path.dirname(output_path), exist_ok=True)
                 jobs.append((input_path, rel_path, output_path))
 
-        # One image in the zip is one image of the daily allowance; a zip that doesn't
+        # One image in the zip is one image of the allowance; a zip that doesn't
         # fit is refused whole rather than returned half done
         if not _reserve_images(bot_token, chat_id, len(jobs)):
             return
