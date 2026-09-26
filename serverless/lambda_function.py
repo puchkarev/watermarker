@@ -25,6 +25,7 @@ Environment variables:
     SYSTEM_DAILY_IMAGES   images per UTC day for the whole deployment (default 5000)
     UNLIMITED_CHAT_IDS    comma-separated chat ids with no personal limit (the system limit still applies)
     ALLOWED_CHAT_IDS  deprecated: comma-separated chat ids; when set, every other chat is refused
+                      and the listed chats are treated as unlimited, as they were before quotas
 """
 import base64
 import hashlib
@@ -83,7 +84,8 @@ def _quota():
     return DailyQuota(_client("dynamodb"), table,
                       free_daily=os.environ.get("FREE_DAILY_IMAGES") or 10,
                       system_daily=os.environ.get("SYSTEM_DAILY_IMAGES") or 5000,
-                      unlimited_chat_ids=_id_set("UNLIMITED_CHAT_IDS"))
+                      # A deprecated allowlist meant "these chats are mine": keep them unthrottled
+                      unlimited_chat_ids=_id_set("UNLIMITED_CHAT_IDS") | _allowed_chat_ids())
 
 
 def _is_image_job(update):

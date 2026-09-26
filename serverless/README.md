@@ -184,8 +184,8 @@ Every request is logged with the chat id, its image count and the running totals
 so `logs` doubles as usage accounting.
 
 The old `--allowed-chat-ids` flag still works for one more release as a hard
-allowlist that refuses every other chat, and the function logs a deprecation line
-while it's set. Clear it with `--allowed-chat-ids ""` once you've moved to
+allowlist: every other chat is refused, the listed chats are treated as unlimited
+(as they were before quotas), and the function logs a deprecation line while it's set. Clear it with `--allowed-chat-ids ""` once you've moved to
 `--unlimited-chat-ids`.
 
 ## Day-to-day commands

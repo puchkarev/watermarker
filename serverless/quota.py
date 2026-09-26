@@ -13,6 +13,14 @@ counter past its limit, subtracts it again and is refused. Checking first and
 adding afterwards would let parallel jobs overshoot. Images that fail or never
 reach the user are subtracted afterwards (release), so only successes count.
 
+A known, self-healing tradeoff: a refused job briefly inflates a counter before
+its refund lands, so a small job racing with it can be refused even though it
+would have fit. Retrying moments later succeeds. That is the price of never
+overshooting the cap, not a bug.
+
+Releases go back to the day the images were reserved on, even when a job runs
+past midnight, and a refund never takes a counter below zero.
+
 Items:  pk = "system#2026-09-26" or "chat#<id>#2026-09-26", images = count,
         expires_at = epoch seconds for DynamoDB TTL to delete old days.
 """
@@ -31,14 +39,16 @@ class DailyQuota:
         self.system_daily = int(system_daily)
         self.unlimited = {str(c) for c in unlimited_chat_ids}
         self.now = now
+        # Day of each chat's last granted reservation, so its release settles that day
+        self._reserved_day = {}
 
     # --- counters ---
 
     def _day(self):
         return self.now().strftime("%Y-%m-%d")
 
-    def _keys(self, chat_id):
-        day = self._day()
+    def _keys(self, chat_id, day=None):
+        day = day or self._day()
         return f"system#{day}", f"chat#{chat_id}#{day}"
 
     def _expires_at(self):
@@ -57,6 +67,16 @@ class DailyQuota:
         )
         return int(result["Attributes"]["images"]["N"])
 
+    def _refund(self, key, count):
+        """Subtract count, never below zero. Errors are logged, not raised: a failed
+        refund only leaves allowance unused until the day's row expires."""
+        try:
+            total = self._add(key, -count)
+            if total < 0:
+                self._add(key, -total)
+        except Exception as e:
+            print(f"quota refund failed key={key} images={count}: {e}")
+
     def _get(self, key):
         item = self.db.get_item(TableName=self.table, Key={"pk": {"S": key}}).get("Item")
         return int(item["images"]["N"]) if item else 0
@@ -74,6 +94,8 @@ class DailyQuota:
 
     def _user_message(self, used_before, count):
         left = max(0, self.free_daily - used_before)
+        if self.free_daily == 0:
+            return "This bot has no daily image allowance for your chat."
         if count > self.free_daily:
             # Would be refused every day, so say that rather than today's remainder
             return (f"That zip contains {count} images, which is more than your daily allowance of "
@@ -86,6 +108,8 @@ class DailyQuota:
 
     def _system_message(self, used_before, count):
         left = max(0, self.system_daily - used_before)
+        if self.system_daily == 0:
+            return "This bot isn't processing images at the moment (its daily limit is 0)."
         if count > self.system_daily:
             return (f"That zip contains {count} images, which is more than the bot's daily limit of "
                     f"{self.system_daily} across all users. Try splitting it into smaller zips.")
@@ -103,7 +127,7 @@ class DailyQuota:
 
         system_total = self._add(system_key, count)
         if system_total > self.system_daily:
-            self._add(system_key, -count)
+            self._refund(system_key, count)
             self._log(chat_id, count, "system", system_total - count, None)
             return self._system_message(system_total - count, count)
 
@@ -111,11 +135,12 @@ class DailyQuota:
         if not self.is_unlimited(chat_id):
             chat_total = self._add(chat_key, count)
             if chat_total > self.free_daily:
-                self._add(chat_key, -count)
-                self._add(system_key, -count)
+                self._refund(chat_key, count)
+                self._refund(system_key, count)
                 self._log(chat_id, count, "chat", system_total - count, chat_total - count)
                 return self._user_message(chat_total - count, count)
 
+        self._reserved_day[str(chat_id)] = system_key.split("#")[-1]
         self._log(chat_id, count, None, system_total, chat_total)
         return None
 
@@ -123,10 +148,10 @@ class DailyQuota:
         """Hand back images that were reserved but not delivered."""
         if count <= 0:
             return
-        system_key, chat_key = self._keys(chat_id)
-        self._add(system_key, -count)
+        system_key, chat_key = self._keys(chat_id, self._reserved_day.get(str(chat_id)))
+        self._refund(system_key, count)
         if not self.is_unlimited(chat_id):
-            self._add(chat_key, -count)
+            self._refund(chat_key, count)
         print(f"quota release chat={chat_id} images={count}")
 
     def check(self, chat_id):

@@ -143,6 +143,59 @@ class TestDailyQuota(unittest.TestCase):
         self.assertIsNone(quota.reserve(FREE_CHAT, 10))
         self.assertEqual(self.db.total(f"chat#{FREE_CHAT}#2026-09-27"), 10)
 
+    def test_release_after_midnight_settles_the_reservation_day(self):
+        # A zip reserved at 23:50 can still be running at 00:05
+        clock = Clock(datetime(2026, 9, 26, 23, 50, tzinfo=timezone.utc))
+        quota = _quota(self.db, clock)
+        self.assertIsNone(quota.reserve(FREE_CHAT, 5))
+        clock.when = datetime(2026, 9, 27, 0, 5, tzinfo=timezone.utc)
+        quota.release(FREE_CHAT, 5)
+        self.assertEqual(self.db.total(f"chat#{FREE_CHAT}#2026-09-26"), 0)
+        self.assertEqual(self.db.total("system#2026-09-26"), 0)
+        # The new day is untouched: no bonus allowance, no lowered system count
+        self.assertEqual(self.db.total(f"chat#{FREE_CHAT}#2026-09-27"), 0)
+        self.assertEqual(self.db.total("system#2026-09-27"), 0)
+        self.assertIsNone(quota.reserve(FREE_CHAT, 10))
+        self.assertIsNotNone(quota.reserve(FREE_CHAT, 1))
+
+    def test_refunds_never_take_a_counter_below_zero(self):
+        self.quota.reserve(FREE_CHAT, 2)
+        self.quota.release(FREE_CHAT, 5)
+        self.assertEqual(self.db.total(f"chat#{FREE_CHAT}#2026-09-26"), 0)
+        self.assertEqual(self.db.total("system#2026-09-26"), 0)
+
+    def test_failed_refund_is_logged_not_raised_and_other_refund_still_runs(self):
+        class RefundFails(FakeDynamo):
+            def update_item(self, **kwargs):
+                key = kwargs["Key"]["pk"]["S"]
+                if int(kwargs["ExpressionAttributeValues"][":n"]["N"]) < 0 and key.startswith("chat#"):
+                    raise RuntimeError("ProvisionedThroughputExceededException")
+                return super().update_item(**kwargs)
+
+        db = RefundFails()
+        quota = _quota(db)
+        quota.reserve(FREE_CHAT, 10)
+        with patch("builtins.print") as mock_print:
+            message = quota.reserve(FREE_CHAT, 3)
+        self.assertIn("Daily limit reached", message)
+        self.assertTrue(any("quota refund failed" in str(c) for c in mock_print.call_args_list))
+        # The chat refund failed, but the system refund still ran
+        self.assertEqual(db.total("system#2026-09-26"), 10)
+
+    def test_zero_free_allowance_messages(self):
+        quota = _quota(self.db, free=0)
+        message = "This bot has no daily image allowance for your chat."
+        self.assertEqual(quota.reserve(FREE_CHAT, 1), message)
+        self.assertEqual(quota.reserve(FREE_CHAT, 20), message)
+        self.assertEqual(quota.check(FREE_CHAT), message)
+        self.assertIsNone(quota.reserve(UNLIMITED_CHAT, 1))
+
+    def test_zero_system_limit_message(self):
+        quota = _quota(self.db, system=0)
+        message = "This bot isn't processing images at the moment (its daily limit is 0)."
+        self.assertEqual(quota.reserve(UNLIMITED_CHAT, 1), message)
+        self.assertEqual(quota.check(FREE_CHAT), message)
+
     def test_rows_expire_after_their_day(self):
         self.quota.reserve(FREE_CHAT, 1)
         expires = self.db.items[f"chat#{FREE_CHAT}#2026-09-26"]["expires_at"]
@@ -364,6 +417,14 @@ class TestQuotaInTheLambda(unittest.TestCase):
         self.lambda_client.invoke.assert_not_called()
         self.assertIn("This bot is private", mock_send.call_args[0][2])
         self.assertTrue(any("ALLOWED_CHAT_IDS is deprecated" in str(c) for c in mock_print.call_args_list))
+
+    def test_deprecated_allowlist_chats_are_unlimited(self):
+        # Upgrading with ALLOWED_CHAT_IDS set must not throttle the owner's own chats
+        self._exhaust(FREE_CHAT)
+        with patch.dict(os.environ, {"ALLOWED_CHAT_IDS": str(FREE_CHAT)}):
+            self.assertTrue(lambda_function._quota().is_unlimited(FREE_CHAT))
+            lambda_function.handler(self._event({"chat": FREE_CHAT, "photo": [{"file_id": "p"}]}), self.context)
+        self.lambda_client.invoke.assert_called_once()
 
     def test_quota_disabled_without_a_table(self):
         with patch.dict(os.environ, {"QUOTA_TABLE": ""}):
