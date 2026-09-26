@@ -107,7 +107,8 @@ What *is* stored:
 
 The bot runs on Amazon Web Services in the US East region, so data is processed
 there. To have your stored settings, watermark and balance deleted, ask via
-`/paysupport`. Note that deleting a balance forfeits unused credits.
+`/paysupport` or email <victor.puchkarev@gmail.com>. Note that deleting a balance
+forfeits unused credits.
 
 ## 9. Availability and changes
 
@@ -132,7 +133,11 @@ Nothing here removes rights you have under consumer law that cannot be waived.
 ## 11. Support and disputes
 
 Use `/paysupport` in the bot for anything about payments, credits or refunds, and
-`/terms` to see this document.
+`/terms` to see this document. `/paysupport` reaches:
+
+**Victor Puchkarev — <victor.puchkarev@gmail.com>**
+
+Please include which pack you bought and roughly when, so the purchase can be found.
 
 For bugs and feature requests, the public issue tracker is
 <https://github.com/puchkarev/watermarker/issues>. **Do not post payment details,
@@ -147,5 +152,10 @@ top. Continuing to use the bot after a change means you accept it.
 
 ## 13. Governing law
 
-These terms are governed by the laws of **[JURISDICTION — to be completed by the
-owner]**.
+These terms are governed by the laws of the **State of California, United States**,
+without regard to its conflict-of-laws rules. Any dispute that cannot be settled
+through `/paysupport` will be handled in the state or federal courts located in
+California.
+
+Nothing in this section removes rights you have under the mandatory consumer law of
+your own country of residence.
