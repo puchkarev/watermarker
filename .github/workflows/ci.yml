@@ -32,19 +32,26 @@ jobs:
 
     - name: Check the Lambda runtime is a tested version
       run: |
-        runtime=$(sed -n 's/^ *Runtime: python\([0-9.]*\)$/\1/p' serverless/template.yaml)
-        wheels=$(sed -n 's/.*--python-version \([0-9.]*\).*/\1/p' serverless/deploy.sh)
-        echo "template.yaml runtime: $runtime, deploy.sh wheels: $wheels"
-        if [ -z "$runtime" ] || [ -z "$wheels" ]; then
+        # Each file may mention its version more than once; they must all agree
+        runtimes=$(sed -n 's/^ *Runtime: python\([0-9.]*\) *$/\1/p' serverless/template.yaml | sort -u)
+        wheels=$(sed -n 's/.*--python-version \([0-9.]*\).*/\1/p' serverless/deploy.sh | sort -u)
+        echo "template.yaml runtime: $(echo $runtimes), deploy.sh wheels: $(echo $wheels)"
+        if [ -z "$runtimes" ] || [ -z "$wheels" ]; then
           echo "::error::Couldn't read the Python version from serverless/template.yaml or serverless/deploy.sh"
           exit 1
         fi
-        if [ "$runtime" != "$wheels" ]; then
-          echo "::error::serverless/template.yaml runs Python $runtime but deploy.sh packages wheels for $wheels"
+        if [ "$(echo "$runtimes" | wc -l)" -ne 1 ] || [ "$(echo "$wheels" | wc -l)" -ne 1 ]; then
+          echo "::error::Expected one Python version in each file, found template.yaml: $(echo $runtimes), deploy.sh: $(echo $wheels)"
           exit 1
         fi
-        if ! grep -Eq "^ *python-version: \[.*'$runtime'.*\]" .github/workflows/ci.yml; then
-          echo "::error::The Lambda runs Python $runtime, which the CI matrix doesn't test"
+        if [ "$runtimes" != "$wheels" ]; then
+          echo "::error::serverless/template.yaml runs Python $runtimes but deploy.sh packages wheels for $wheels"
+          exit 1
+        fi
+        # Read the matrix as YAML (yq ships on GitHub's Ubuntu runners), so its formatting doesn't matter
+        command -v yq > /dev/null || { echo "::error::yq isn't installed on this runner"; exit 1; }
+        if ! yq -r '.jobs.test.strategy.matrix["python-version"][]' .github/workflows/ci.yml | grep -qxF "$runtimes"; then
+          echo "::error::The Lambda runs Python $runtimes, which the CI matrix doesn't test"
           exit 1
         fi
 
