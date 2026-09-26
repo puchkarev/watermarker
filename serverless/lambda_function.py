@@ -12,7 +12,7 @@ The receiver answers immediately because Telegram re-sends an update when the
 webhook is slow, which would process the same zip more than once.
 
 The only things kept between runs are each chat's configuration (its settings
-JSON and its /source watermark image, tiny objects in S3) and the daily image
+JSON and its /source watermark image, tiny objects in S3) and the image
 counters in DynamoDB (quota.py). Photos and zips only ever live in /tmp for the
 duration of one invocation.
 
@@ -20,8 +20,9 @@ Environment variables:
     BOT_TOKEN         Telegram bot token
     WEBHOOK_SECRET    shared secret Telegram sends in X-Telegram-Bot-Api-Secret-Token
     STATE_BUCKET      S3 bucket holding per-chat settings and watermarks
-    QUOTA_TABLE       DynamoDB table of daily image counters (see quota.py); unset disables quotas
-    FREE_DAILY_IMAGES     images per UTC day for chats not in UNLIMITED_CHAT_IDS (default 10)
+    QUOTA_TABLE       DynamoDB table of image counters (see quota.py); unset disables quotas
+    FREE_MONTHLY_IMAGES   images per UTC month for chats not in UNLIMITED_CHAT_IDS (default 10)
+    FREE_DAILY_IMAGES     deprecated name, read only when FREE_MONTHLY_IMAGES is unset (now per month)
     SYSTEM_DAILY_IMAGES   images per UTC day for the whole deployment (default 5000)
     UNLIMITED_CHAT_IDS    comma-separated chat ids with no personal limit (the system limit still applies)
     ALLOWED_CHAT_IDS  deprecated: comma-separated chat ids; when set, every other chat is refused
@@ -42,7 +43,7 @@ for _path in (_HERE, os.path.dirname(_HERE)):
         sys.path.insert(0, _path)
 
 import watermarker
-from quota import DailyQuota
+from quota import ImageQuota
 
 WORK_DIR = os.environ.get("WORK_DIR", "/tmp/watermarker")
 TASK_KEY = "watermarker_task"
@@ -77,12 +78,17 @@ def _allowed_chat_ids():
 
 
 def _quota():
-    """The deployment's daily image quota, or None when no quota table is configured."""
+    """The deployment's image quota, or None when no quota table is configured."""
     table = os.environ.get("QUOTA_TABLE")
     if not table:
         return None
-    return DailyQuota(_client("dynamodb"), table,
-                      free_daily=os.environ.get("FREE_DAILY_IMAGES") or 10,
+    free = os.environ.get("FREE_MONTHLY_IMAGES")
+    if not free and os.environ.get("FREE_DAILY_IMAGES"):
+        free = os.environ["FREE_DAILY_IMAGES"]
+        print("FREE_DAILY_IMAGES is deprecated and now applies per month: set FREE_MONTHLY_IMAGES "
+              "(deploy.sh --free-monthly-images) instead.")
+    return ImageQuota(_client("dynamodb"), table,
+                      free_monthly=free or 10,
                       system_daily=os.environ.get("SYSTEM_DAILY_IMAGES") or 5000,
                       # A deprecated allowlist meant "these chats are mine": keep them unthrottled
                       unlimited_chat_ids=_id_set("UNLIMITED_CHAT_IDS") | _allowed_chat_ids())
