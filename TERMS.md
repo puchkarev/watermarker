@@ -72,10 +72,13 @@ charged for a failure:
 So the only credits you cannot get back are ones you have actually spent, or ones
 you bought and chose not to use.
 
-Two things sit outside the bot's control: **Telegram** may refund a Stars payment
-under its own policies, and **your app store** may refund your purchase of the
-Stars themselves. Requests of that kind go to Telegram or to your app store, not to
-the bot.
+If you want to pursue a refund regardless, it is a matter for **Telegram**, not for
+the bot: Telegram may reverse a Stars payment under its own policies, and your app
+store may refund your purchase of the Stars themselves. Neither is something the bot
+controls or can carry out on your behalf.
+
+You are also welcome to raise it by email at <victor.puchkarev@gmail.com>, though
+whether any Star payment is reversed remains Telegram's decision.
 
 ## 5. Limits
 
