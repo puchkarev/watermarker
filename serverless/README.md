@@ -200,7 +200,7 @@ allowlist: every other chat is refused, the listed chats are treated as unlimite
 | `./serverless/deploy.sh logs` | Follow the function's logs live (Ctrl+C to stop) |
 | `./serverless/deploy.sh detach` | Remove the webhook, for example to hand the token back to a server |
 | `./serverless/deploy.sh attach` | Set the webhook again |
-| `./serverless/deploy.sh remove` | Remove the webhook and delete the stack (asks first). The settings bucket is kept, and the script prints the command to delete it. |
+| `./serverless/deploy.sh remove` | Remove the webhook and delete the stack (asks first). The settings bucket and the quota table are kept, and the script prints the commands to delete them. |
 
 Every command accepts `--stack-name NAME` (default `watermarker-bot`) and
 `--region REGION`. Use a different stack name to run more than one bot.

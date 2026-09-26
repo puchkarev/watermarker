@@ -259,8 +259,9 @@ cmd_logs() {
 
 cmd_remove() {
     stack_exists || fail "stack '$STACK_NAME' not found"
-    local bucket
+    local bucket table
     bucket=$(stack_output StateBucketName)
+    table=$(stack_output QuotaTableName)
     read -r -p "Delete stack '$STACK_NAME' and stop the bot's webhook? [y/N] " answer
     [[ "$answer" =~ ^[Yy]$ ]] || { echo "Cancelled."; exit 0; }
 
@@ -268,8 +269,8 @@ cmd_remove() {
     info "Deleting the stack"
     aws cloudformation delete-stack --stack-name "$STACK_NAME"
     aws cloudformation wait stack-delete-complete --stack-name "$STACK_NAME"
-    info "Stack deleted. The per-chat settings bucket was kept: $bucket"
-    echo "   To delete it too: aws s3 rb s3://$bucket --force"
+    info "Stack deleted. The per-chat settings bucket and the quota table were kept: $bucket, $table"
+    echo "   To delete them too: aws s3 rb s3://$bucket --force && aws dynamodb delete-table --table-name $table"
 }
 
 check_prerequisites

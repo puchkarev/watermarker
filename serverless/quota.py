@@ -22,9 +22,11 @@ Releases go back to the month and day the images were reserved in, even when a
 job runs past midnight or into the next month, and a refund never takes a
 counter below zero.
 
-Items:  pk = "system#2026-09-26" (per day) or "chat#<id>#2026-09" (per month),
-        images = count, expires_at = epoch seconds for DynamoDB TTL to delete
-        the row once its period and the one after it are over.
+Items:  pk = "system" or "chat#<id>", sk = "usage#2026-09-26" (system, per day)
+        or "usage#2026-09" (chat, per month), images = count, expires_at = epoch
+        seconds for DynamoDB TTL to delete the row once its period and the one
+        after it are over. Keying by owner then record type keeps everything
+        about one chat in one partition, readable with a single Query.
 """
 from datetime import datetime, timedelta, timezone
 
@@ -39,8 +41,8 @@ def _next_month(when):
 
 
 def _expires_at(key):
-    """Keep a row until the end of the period after its own, then let TTL delete it."""
-    period = key.rsplit("#", 1)[-1]
+    """Keep a usage row until the end of the period after its own, then let TTL delete it."""
+    period = key[1].rsplit("#", 1)[-1]
     if len(period) == len("2026-09"):
         start = datetime.strptime(period, "%Y-%m").replace(tzinfo=timezone.utc)
         end = _next_month(_next_month(start))
@@ -74,13 +76,18 @@ class ImageQuota:
     def _keys(self, chat_id, period=None):
         now = self.now()
         day, month = period or (now.strftime("%Y-%m-%d"), now.strftime("%Y-%m"))
-        return f"system#{day}", f"chat#{chat_id}#{month}"
+        return ("system", f"usage#{day}"), (f"chat#{chat_id}", f"usage#{month}")
+
+    @staticmethod
+    def _item_key(key):
+        pk, sk = key
+        return {"pk": {"S": pk}, "sk": {"S": sk}}
 
     def _add(self, key, count):
-        """Atomically add count (may be negative) and return the new total."""
+        """Atomically add count (may be negative) to a (pk, sk) row and return the new total."""
         result = self.db.update_item(
             TableName=self.table,
-            Key={"pk": {"S": key}},
+            Key=self._item_key(key),
             UpdateExpression="ADD images :n SET expires_at = if_not_exists(expires_at, :exp)",
             ExpressionAttributeValues={":n": {"N": str(count)}, ":exp": {"N": str(_expires_at(key))}},
             ReturnValues="UPDATED_NEW",
@@ -95,10 +102,10 @@ class ImageQuota:
             if total < 0:
                 self._add(key, -total)
         except Exception as e:
-            print(f"quota refund failed key={key} images={count}: {e}")
+            print(f"quota refund failed key={'/'.join(key)} images={count}: {e}")
 
     def _get(self, key):
-        item = self.db.get_item(TableName=self.table, Key={"pk": {"S": key}}).get("Item")
+        item = self.db.get_item(TableName=self.table, Key=self._item_key(key)).get("Item")
         return int(item["images"]["N"]) if item else 0
 
     def is_unlimited(self, chat_id):
