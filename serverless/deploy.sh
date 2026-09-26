@@ -14,7 +14,10 @@
 #
 # Options:
 #   --bot-token TOKEN        Telegram bot token (asked for on first deploy; kept on later deploys)
-#   --allowed-chat-ids IDS   comma-separated chat ids allowed to use the bot ("" allows everyone)
+#   --unlimited-chat-ids IDS comma-separated chat ids with no personal daily limit
+#   --free-daily-images N    images per UTC day for every other chat (default 10)
+#   --system-daily-images N  images per UTC day for the whole bot (default 5000)
+#   --allowed-chat-ids IDS   deprecated hard allowlist; pass "" to clear it
 #   --memory MB              Lambda memory, 1024-10240 (default 2048)
 #   --stack-name NAME        CloudFormation stack and function name (default watermarker-bot)
 #   --region REGION          AWS region (default: your AWS CLI default region)
@@ -32,9 +35,13 @@ STACK_NAME="watermarker-bot"
 BOT_TOKEN_ARG=""
 ALLOWED_CHAT_IDS=""
 ALLOWED_SET="false"
+UNLIMITED_CHAT_IDS=""
+UNLIMITED_SET="false"
+FREE_DAILY=""
+SYSTEM_DAILY=""
 MEMORY=""
 
-usage() { sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; }
 info() { echo "==> $*"; }
 fail() { echo "Error: $*" >&2; exit 1; }
 
@@ -45,6 +52,9 @@ while [[ $# -gt 0 ]]; do
         deploy|attach|detach|status|logs|remove) COMMAND="$1"; shift ;;
         --bot-token) BOT_TOKEN_ARG="${2:?--bot-token needs a value}"; shift 2 ;;
         --allowed-chat-ids) ALLOWED_CHAT_IDS="${2-}"; ALLOWED_SET="true"; shift 2 ;;
+        --unlimited-chat-ids) UNLIMITED_CHAT_IDS="${2-}"; UNLIMITED_SET="true"; shift 2 ;;
+        --free-daily-images) FREE_DAILY="${2:?--free-daily-images needs a value}"; shift 2 ;;
+        --system-daily-images) SYSTEM_DAILY="${2:?--system-daily-images needs a value}"; shift 2 ;;
         --memory) MEMORY="${2:?--memory needs a value}"; shift 2 ;;
         --stack-name) STACK_NAME="${2:?--stack-name needs a value}"; shift 2 ;;
         --region) export AWS_REGION="${2:?--region needs a value}"; export AWS_DEFAULT_REGION="$AWS_REGION"; shift 2 ;;
@@ -115,7 +125,7 @@ build_package() {
         -r "$SCRIPT_DIR/requirements.txt"
 
     cp "$REPO_DIR/watermarker.py" "$REPO_DIR/watermarker_core.py" "$REPO_DIR/sun.webp" \
-       "$SCRIPT_DIR/lambda_function.py" "$BUILD_DIR/pkg/"
+       "$SCRIPT_DIR/lambda_function.py" "$SCRIPT_DIR/quota.py" "$BUILD_DIR/pkg/"
     cp "$tele" "$BUILD_DIR/pkg/submodules/telegram/"
 
     (cd "$BUILD_DIR/pkg" && zip -qr9 "$PACKAGE" . -x '*__pycache__*')
@@ -141,6 +151,9 @@ cmd_deploy() {
     fi
     if [[ -n "$bot_token" ]]; then params+=("BotToken=$bot_token"); fi
     if [[ "$ALLOWED_SET" == "true" ]]; then params+=("AllowedChatIds=$ALLOWED_CHAT_IDS"); fi
+    if [[ "$UNLIMITED_SET" == "true" ]]; then params+=("UnlimitedChatIds=$UNLIMITED_CHAT_IDS"); fi
+    if [[ -n "$FREE_DAILY" ]]; then params+=("FreeDailyImages=$FREE_DAILY"); fi
+    if [[ -n "$SYSTEM_DAILY" ]]; then params+=("SystemDailyImages=$SYSTEM_DAILY"); fi
     if [[ -n "$MEMORY" ]]; then params+=("MemorySize=$MEMORY"); fi
 
     build_package
@@ -230,7 +243,10 @@ cmd_status() {
     echo "Function:      $(stack_output FunctionName)"
     echo "Webhook URL:   $(stack_output WebhookUrl)"
     echo "State bucket:  $(stack_output StateBucketName)"
-    echo "Allowed chats: $(function_env ALLOWED_CHAT_IDS)"
+    echo "Quota table:   $(stack_output QuotaTableName)"
+    echo "Daily images:  $(function_env FREE_DAILY_IMAGES) per chat, $(function_env SYSTEM_DAILY_IMAGES) for the whole bot"
+    echo "Unlimited:     $(function_env UNLIMITED_CHAT_IDS)"
+    echo "Allowed chats: $(function_env ALLOWED_CHAT_IDS) (deprecated allowlist; empty = quotas apply to everyone)"
     echo "Telegram webhook info:"
     curl -sS "https://api.telegram.org/bot$(function_env BOT_TOKEN)/getWebhookInfo" | python3 -m json.tool
 }

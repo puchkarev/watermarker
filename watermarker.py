@@ -390,6 +390,29 @@ def process_text(bot_token, chat_id, text):
 
 NO_WATERMARK_MESSAGE = "No watermark set and default 'sun.webp' not found. Use /source <url> to set one."
 
+# Optional daily image quota. The serverless deployment installs one (see
+# serverless/quota.py); left as None, as on a server, nothing is counted.
+# It needs reserve(chat_id, n) -> refusal message or None, and release(chat_id, n).
+QUOTA = None
+
+def _reserve_images(bot_token, chat_id, count):
+    """Claim `count` images of the chat's allowance. False (after telling the user why) if refused."""
+    if QUOTA is None or count <= 0:
+        return True
+    refusal = QUOTA.reserve(chat_id, count)
+    if refusal:
+        tele.send_telegram(bot_token, str(chat_id), refusal)
+        return False
+    return True
+
+def _release_images(chat_id, count):
+    """Give back allowance for images that weren't delivered, so only successes count."""
+    if QUOTA is not None and count > 0:
+        try:
+            QUOTA.release(chat_id, count)
+        except Exception as e:
+            print(f"Error releasing {count} image(s) of quota for {chat_id}: {e}")
+
 # Peak memory of one watermark job: decoding costs ~8 bytes per input pixel, and the
 # RGBA working copies (base, watermark layer, composite) the rest. Measured peaks: an
 # 8MP photo ~435-450 MB, a 33MP one resized to 8MP ~600 MB. The per-output constant is
@@ -478,6 +501,7 @@ def _process_zip(bot_token, chat_id, file_id, file_name):
 
     zip_path = None
     extract_dir = processed_dir = result_zip_path = None
+    reserved = delivered = 0
 
     try:
         zip_path = _download_file(bot_token, file_id)
@@ -517,6 +541,12 @@ def _process_zip(bot_token, chat_id, file_id, file_name):
                 os.makedirs(os.path.dirname(output_path), exist_ok=True)
                 jobs.append((input_path, rel_path, output_path))
 
+        # One image in the zip is one image of the daily allowance; a zip that doesn't
+        # fit is refused whole rather than returned half done
+        if not _reserve_images(bot_token, chat_id, len(jobs)):
+            return
+        reserved = len(jobs)
+
         def run(job):
             input_path, _, output_path = job
             return apply_watermark(input_path, watermark_path, output_path, **options)
@@ -539,6 +569,7 @@ def _process_zip(bot_token, chat_id, file_id, file_name):
                 caption += f" {len(failed)} failed."
             caption += skipped_note
             _send_document(bot_token, chat_id, result_zip_path, result_name, caption)
+            delivered = processed_count
 
             if failed:
                 tele.send_telegram(bot_token, str(chat_id),
@@ -553,6 +584,8 @@ def _process_zip(bot_token, chat_id, file_id, file_name):
         print(f"Error processing zip: {e}")
         tele.send_telegram(bot_token, str(chat_id), f"Error processing zip file: {_describe_error(e)}")
     finally:
+        # Failed images, or a result that never reached the user, don't use up allowance
+        _release_images(chat_id, reserved - delivered)
         # Cleanup
         if zip_path and os.path.exists(zip_path): os.remove(zip_path)
         if extract_dir and os.path.exists(extract_dir): shutil.rmtree(extract_dir)
@@ -566,7 +599,11 @@ def _process_single_image(bot_token, chat_id, file_id, output_ext, result_name):
         tele.send_telegram(bot_token, str(chat_id), NO_WATERMARK_MESSAGE)
         return
 
+    if not _reserve_images(bot_token, chat_id, 1):
+        return
+
     local_path = output_path = None
+    delivered = 0
     try:
         local_path = _download_file(bot_token, file_id)
         output_path = os.path.join(TEMP_DIR, f"watermarked_{os.path.splitext(os.path.basename(local_path))[0]}{output_ext}")
@@ -574,12 +611,14 @@ def _process_single_image(bot_token, chat_id, file_id, output_ext, result_name):
         options = _watermark_options(load_settings(chat_id))
         if apply_watermark(local_path, watermark_path, output_path, **options):
             _send_document(bot_token, chat_id, output_path, result_name)
+            delivered = 1
         else:
             tele.send_telegram(bot_token, str(chat_id), "Error processing image.")
     except Exception as e:
         print(f"Error processing photo: {e}")
         tele.send_telegram(bot_token, str(chat_id), f"Error processing image: {_describe_error(e)}")
     finally:
+        _release_images(chat_id, 1 - delivered)
         # Cleanup
         if local_path and os.path.exists(local_path):
             os.remove(local_path)

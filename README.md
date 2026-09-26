@@ -63,7 +63,7 @@ For production environments, you can use the provided deployment script to fetch
 
 ### Serverless Deployment (AWS Lambda, on demand)
 
-If the bot is only used occasionally, it can instead run on AWS Lambda. It only runs while it handles a message, so a bot used for one batch a week costs effectively nothing (it stays inside the AWS free tier). It uses the same bot code, and nothing is stored except each chat's settings.
+If the bot is only used occasionally, it can instead run on AWS Lambda. It only runs while it handles a message, so a bot used for one batch a week costs effectively nothing (it stays inside the AWS free tier). It uses the same bot code, and nothing is stored except each chat's settings and daily image counts.
 
 **Before you start:** one bot token can only be used by one deployment at a time. Once the Lambda is connected, a server copy of the bot using the same token stops receiving messages. Either stop the server version first (`sudo systemctl stop watermarker`), or create a second bot for the Lambda with [@BotFather](https://t.me/BotFather) (`/newbot`).
 
@@ -81,16 +81,16 @@ If the bot is only used occasionally, it can instead run on AWS Lambda. It only 
 
 To deploy from your own machine instead, install the [AWS CLI v2](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html), `python3` with `pip`, `curl` and `zip`, and run `aws configure` first.
 
-**Recommended:** limit the bot to your own chats so strangers can't use your AWS account. Deploy once with `--allowed-chat-ids 0` and message the bot: it replies with your chat id. Then redeploy with your id(s):
+**Daily limits:** anyone can use the bot, but each chat gets 10 images a day and the whole bot 5000, so strangers can't run up your AWS bill. Make your own chats unlimited (find your chat id with `./serverless/deploy.sh logs`, looking for `quota chat=<id>`):
 ```bash
-./serverless/deploy.sh deploy --allowed-chat-ids 123456789
+./serverless/deploy.sh deploy --unlimited-chat-ids 123456789
 ```
 
 **Managing it:**
 
 | Command | What it does |
 |---|---|
-| `./serverless/deploy.sh deploy` | Build and deploy, or redeploy after a `git pull`. Keeps the token, allowlist and chat settings. |
+| `./serverless/deploy.sh deploy` | Build and deploy, or redeploy after a `git pull`. Keeps the token, limits and chat settings. |
 | `./serverless/deploy.sh status` | Show the setup and whether Telegram can reach it |
 | `./serverless/deploy.sh logs` | Follow the bot's logs live |
 | `./serverless/deploy.sh detach` / `attach` | Hand the bot token to a server copy and back |

@@ -64,3 +64,4 @@ jobs:
       run: |
         python test_watermarker.py
         python serverless/test_lambda_function.py
+        python serverless/test_quota.py
