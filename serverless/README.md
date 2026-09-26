@@ -22,11 +22,12 @@ Telegram ──POST──▶ Lambda Function URL ──▶ receiver: checks the 
   the message to a second, asynchronous run of the same function and returns.
 - **Each zip is processed in its own run**, in parallel. A batch of 20 zips
   finishes in about the time one zip takes.
-- **Nothing is stored except per-chat configuration.** Photos and zips only live
+- **Nothing is stored except per-chat configuration and daily counts.** Photos and zips only live
   in the function's `/tmp` during one run. The settings you set with `/size`,
   `/angle`, etc. and the image from `/source` are kept as tiny files in a private
   S3 bucket (`settings/<chat id>.json`, `watermarks/<chat id>.png`), because a
-  Lambda keeps no disk between runs.
+  Lambda keeps no disk between runs. The only other data is the daily image
+  counters for the quotas (see step 6).
 - **The bot code is not forked.** `lambda_function.py` calls the same
   `handle_update()` from `watermarker.py`, so every command and fix applies to
   both deployments.
@@ -38,6 +39,7 @@ Telegram ──POST──▶ Lambda Function URL ──▶ receiver: checks the 
 | Lambda function `watermarker-bot` | Runs the bot (Python 3.12, ARM, 2 GB memory, 15 min timeout) |
 | Lambda Function URL | Public HTTPS address Telegram sends messages to. Requests without the secret are refused. |
 | S3 bucket | Per-chat settings and watermark images (a few KB) |
+| DynamoDB table | Daily image counters for the quotas; old days delete themselves |
 | IAM role | Lets the function use that bucket, write logs and call itself |
 | CloudWatch log group | Logs, kept for 14 days |
 
@@ -147,28 +149,51 @@ What the script does:
 
 When it prints `Done`, send the bot `/help`, then a photo or a zip.
 
-### 6. (Recommended) Keep strangers out
+### 6. Daily image limits
 
 The Function URL is public so that Telegram can reach it, and anyone who finds
-your bot in Telegram can use it, which costs you compute. To restrict it to your
-chats:
+your bot in Telegram can use it on your AWS account. Daily quotas keep that
+bounded while leaving the bot open:
 
-1. Find your chat id: deploy once with an allowlist that matches nobody
-   (`./serverless/deploy.sh deploy --allowed-chat-ids 0`) and message the bot.
-   It replies with *"This bot is private. Your chat id is …"*.
-2. Redeploy with your id(s), comma-separated. Group chats have negative ids.
+| Who | Limit per UTC day |
+|---|---|
+| Chats you list with `--unlimited-chat-ids` | no personal limit |
+| Everyone else | 10 images (`--free-daily-images`) |
+| The whole bot, all chats together | 5000 images (`--system-daily-images`) |
+
+- One photo counts 1 and a zip of 20 images counts 20. Commands and `/source` are free.
+- Only images that are delivered count. Failed images are handed back.
+- A zip bigger than what's left today is refused whole and nothing is used up;
+  the reply gives the zip's image count and how many are left. A zip bigger than
+  the whole daily allowance is told to split it, since it would never fit. The reply always says whether it was the person's own
+  limit or the bot's overall limit, and when it resets (00:00 UTC).
+- The counters live in a small DynamoDB table (free tier at this volume). Each
+  day's rows delete themselves.
+
+To make your own chats unlimited:
+
+1. Find your chat id: send the bot a photo, then run `./serverless/deploy.sh logs`
+   and look for `quota chat=<id>`. Group chats have negative ids.
+2. Redeploy with your id(s), comma-separated:
    ```bash
-   ./serverless/deploy.sh deploy --allowed-chat-ids 123456789,-1001234567890
+   ./serverless/deploy.sh deploy --unlimited-chat-ids 123456789,-1001234567890
    ```
 
-To open it to everyone again: `--allowed-chat-ids ""`.
+Change the limits the same way, e.g. `--free-daily-images 20 --system-daily-images 2000`.
+Every request is logged with the chat id, its image count and the running totals,
+so `logs` doubles as usage accounting.
+
+The old `--allowed-chat-ids` flag still works for one more release as a hard
+allowlist: every other chat is refused, the listed chats are treated as unlimited
+(as they were before quotas), and the function logs a deprecation line while it's set. Clear it with `--allowed-chat-ids ""` once you've moved to
+`--unlimited-chat-ids`.
 
 ## Day-to-day commands
 
 | Command | What it does |
 |---|---|
-| `./serverless/deploy.sh deploy` | Rebuild and redeploy (after `git pull`). Keeps the token, secret, allowlist and all chat settings. |
-| `./serverless/deploy.sh status` | Show the webhook URL, bucket, allowlist and Telegram's webhook status, including the last error Telegram saw |
+| `./serverless/deploy.sh deploy` | Rebuild and redeploy (after `git pull`). Keeps the token, secret, limits, unlimited chats and all chat settings. |
+| `./serverless/deploy.sh status` | Show the webhook URL, bucket, daily limits, unlimited chats and Telegram's webhook status, including the last error Telegram saw |
 | `./serverless/deploy.sh logs` | Follow the function's logs live (Ctrl+C to stop) |
 | `./serverless/deploy.sh detach` | Remove the webhook, for example to hand the token back to a server |
 | `./serverless/deploy.sh attach` | Set the webhook again |

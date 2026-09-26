@@ -11,15 +11,21 @@ always-on polling loop, Telegram pushes each message to a Lambda Function URL:
 The receiver answers immediately because Telegram re-sends an update when the
 webhook is slow, which would process the same zip more than once.
 
-The only thing kept between runs is each chat's configuration (its settings
-JSON and its /source watermark image), stored as tiny objects in S3. Photos
-and zips only ever live in /tmp for the duration of one invocation.
+The only things kept between runs are each chat's configuration (its settings
+JSON and its /source watermark image, tiny objects in S3) and the daily image
+counters in DynamoDB (quota.py). Photos and zips only ever live in /tmp for the
+duration of one invocation.
 
 Environment variables:
     BOT_TOKEN         Telegram bot token
     WEBHOOK_SECRET    shared secret Telegram sends in X-Telegram-Bot-Api-Secret-Token
     STATE_BUCKET      S3 bucket holding per-chat settings and watermarks
-    ALLOWED_CHAT_IDS  optional comma-separated chat ids; empty allows everyone
+    QUOTA_TABLE       DynamoDB table of daily image counters (see quota.py); unset disables quotas
+    FREE_DAILY_IMAGES     images per UTC day for chats not in UNLIMITED_CHAT_IDS (default 10)
+    SYSTEM_DAILY_IMAGES   images per UTC day for the whole deployment (default 5000)
+    UNLIMITED_CHAT_IDS    comma-separated chat ids with no personal limit (the system limit still applies)
+    ALLOWED_CHAT_IDS  deprecated: comma-separated chat ids; when set, every other chat is refused
+                      and the listed chats are treated as unlimited, as they were before quotas
 """
 import base64
 import hashlib
@@ -36,6 +42,7 @@ for _path in (_HERE, os.path.dirname(_HERE)):
         sys.path.insert(0, _path)
 
 import watermarker
+from quota import DailyQuota
 
 WORK_DIR = os.environ.get("WORK_DIR", "/tmp/watermarker")
 TASK_KEY = "watermarker_task"
@@ -60,9 +67,33 @@ def _secret_matches(given):
     return bool(expected) and hmac.compare_digest(str(given or ""), expected)
 
 
-def _allowed_chat_ids():
-    raw = os.environ.get("ALLOWED_CHAT_IDS", "")
+def _id_set(variable):
+    raw = os.environ.get(variable, "")
     return {part.strip() for part in raw.split(",") if part.strip()}
+
+
+def _allowed_chat_ids():
+    return _id_set("ALLOWED_CHAT_IDS")
+
+
+def _quota():
+    """The deployment's daily image quota, or None when no quota table is configured."""
+    table = os.environ.get("QUOTA_TABLE")
+    if not table:
+        return None
+    return DailyQuota(_client("dynamodb"), table,
+                      free_daily=os.environ.get("FREE_DAILY_IMAGES") or 10,
+                      system_daily=os.environ.get("SYSTEM_DAILY_IMAGES") or 5000,
+                      # A deprecated allowlist meant "these chats are mine": keep them unthrottled
+                      unlimited_chat_ids=_id_set("UNLIMITED_CHAT_IDS") | _allowed_chat_ids())
+
+
+def _is_image_job(update):
+    """Photos and files cost allowance; commands and /source uploads don't."""
+    message = update.get("message", {})
+    if (message.get("caption") or "").strip().startswith("/source"):
+        return False
+    return "photo" in message or "document" in message
 
 
 def _chat_id(update):
@@ -100,11 +131,30 @@ def receive(event, context):
         return _response(200)
 
     allowed = _allowed_chat_ids()
-    if allowed and str(chat_id) not in allowed:
-        print(f"Ignoring message from chat {chat_id}: not in ALLOWED_CHAT_IDS")
-        watermarker.tele.send_telegram(os.environ["BOT_TOKEN"], str(chat_id),
-                                       f"This bot is private. Your chat id is {chat_id}.")
-        return _response(200)
+    if allowed:
+        # Kept as a hard allowlist for one release so an existing lockdown doesn't silently open up
+        print("ALLOWED_CHAT_IDS is deprecated: the bot now uses daily quotas. Set UNLIMITED_CHAT_IDS "
+              "(deploy.sh --unlimited-chat-ids) and clear ALLOWED_CHAT_IDS (--allowed-chat-ids '').")
+        if str(chat_id) not in allowed:
+            print(f"Ignoring message from chat {chat_id}: not in ALLOWED_CHAT_IDS")
+            watermarker.tele.send_telegram(os.environ["BOT_TOKEN"], str(chat_id),
+                                           f"This bot is private. Your chat id is {chat_id}.")
+            return _response(200)
+
+    # Refuse here, before a 2 GB worker starts, when there's no allowance left at all.
+    # The worker makes the authoritative reservation once it knows how many images there are.
+    if _is_image_job(update):
+        quota = _quota()
+        if quota is not None:
+            try:
+                refusal = quota.check(chat_id)
+            except Exception as e:
+                print(f"Quota check failed for {chat_id}, leaving it to the worker: {e}")
+                refusal = None
+            if refusal:
+                print(f"quota chat={chat_id} refused before processing")
+                watermarker.tele.send_telegram(os.environ["BOT_TOKEN"], str(chat_id), refusal)
+                return _response(200)
 
     _client("lambda").invoke(
         FunctionName=context.invoked_function_arn,
@@ -190,6 +240,7 @@ def run_task(event):
 
     _prepare_work_dir()
     try:
+        watermarker.QUOTA = _quota()
         before = pull_state(bucket, chat_id)
         watermarker.handle_update(bot_token, update)
         push_state(bucket, chat_id, before)

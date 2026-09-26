@@ -14,10 +14,24 @@ Parameters:
     NoEcho: true
     AllowedPattern: "[A-Za-z0-9_-]{16,256}"
     Description: Random secret Telegram sends with each webhook call
+  UnlimitedChatIds:
+    Type: String
+    Default: ""
+    Description: Comma-separated chat ids with no personal daily limit (the system limit still applies)
+  FreeDailyImages:
+    Type: Number
+    Default: 10
+    MinValue: 0
+    Description: Images per UTC day for every other chat
+  SystemDailyImages:
+    Type: Number
+    Default: 5000
+    MinValue: 0
+    Description: Images per UTC day for the whole deployment, all chats together
   AllowedChatIds:
     Type: String
     Default: ""
-    Description: Optional comma-separated chat ids allowed to use the bot (empty = anyone)
+    Description: Deprecated hard allowlist - when set, every other chat is refused. Use UnlimitedChatIds and quotas instead
   MemorySize:
     Type: Number
     Default: 2048
@@ -38,6 +52,21 @@ Resources:
         BlockPublicPolicy: true
         IgnorePublicAcls: true
         RestrictPublicBuckets: true
+
+  # Daily image counters (see serverless/quota.py). Rows expire on their own via TTL.
+  QuotaTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: expires_at
+        Enabled: true
 
   FunctionRole:
     Type: AWS::IAM::Role
@@ -62,6 +91,10 @@ Resources:
               - Effect: Allow
                 Action: s3:ListBucket
                 Resource: !GetAtt StateBucket.Arn
+              # Atomic daily counters
+              - Effect: Allow
+                Action: [dynamodb:UpdateItem, dynamodb:GetItem]
+                Resource: !GetAtt QuotaTable.Arn
               # The receiver hands each update to itself asynchronously
               - Effect: Allow
                 Action: lambda:InvokeFunction
@@ -92,6 +125,10 @@ Resources:
           WEBHOOK_SECRET: !Ref WebhookSecret
           STATE_BUCKET: !Ref StateBucket
           ALLOWED_CHAT_IDS: !Ref AllowedChatIds
+          QUOTA_TABLE: !Ref QuotaTable
+          UNLIMITED_CHAT_IDS: !Ref UnlimitedChatIds
+          FREE_DAILY_IMAGES: !Ref FreeDailyImages
+          SYSTEM_DAILY_IMAGES: !Ref SystemDailyImages
       # Placeholder: deploy.sh uploads the real package right after the stack deploys
       Code:
         ZipFile: |
@@ -129,3 +166,5 @@ Outputs:
     Value: !GetAtt FunctionUrl.FunctionUrl
   StateBucketName:
     Value: !Ref StateBucket
+  QuotaTableName:
+    Value: !Ref QuotaTable
