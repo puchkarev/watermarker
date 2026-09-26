@@ -13,6 +13,11 @@ You send the bot photos or a `.zip` of images; it applies a watermark and sends 
 results back. Position, size, angle, opacity, spacing, output quality and the
 watermark image itself are configurable per chat. See `/help` in the bot.
 
+**Your images are not retained.** Photos and zips exist only in temporary storage
+while a single request is processed, and are deleted as soon as it finishes. They
+are never written to a database, never used to train anything, never reviewed by a
+person, and never shared with anyone. Section 8 sets out the detail.
+
 The service is operated by the bot's owner as a personal project. It is not a
 company, and it carries no service-level guarantee.
 
@@ -48,19 +53,29 @@ and your app store; these terms cover only what the bot gives you in return.
 
 Prices may change. A change never affects credits you have already bought.
 
-## 4. Refunds
+## 4. No refunds
 
-- **Unused packs:** if you have bought a pack and used none of its images, you may
-  request a full refund. Contact `/paysupport`.
-- **Partly used packs:** these are not automatically refundable, because the work
-  has already been done. Contact `/paysupport` and it will be looked at case by
-  case.
-- **Our failures:** if the bot takes your credits and does not deliver, the credits
-  are returned automatically. If that does not happen, contact `/paysupport` and
-  the credits will be restored or the payment refunded.
+**All purchases are final.** Credits cannot be refunded, exchanged for money or
+Stars, or transferred to another chat. If you are unsure whether the bot suits your
+needs, use your free monthly images first, and buy the smaller pack before the
+larger one.
 
-Refunds of Stars are issued through Telegram and returned to your Telegram Stars
-balance, not to your card.
+This is not the same as being charged for work that wasn't done. You are never
+charged for a failure:
+
+- Images that fail to process, or results that never reach you, **do not consume**
+  your allowance or credits. This is automatic — there is nothing to claim and
+  nobody to ask.
+- A zip needing more images than you have available is refused whole and costs you
+  nothing at all.
+
+So the only credits you cannot get back are ones you have actually spent, or ones
+you bought and chose not to use.
+
+Two things sit outside the bot's control: **Telegram** may refund a Stars payment
+under its own policies, and **your app store** may refund your purchase of the
+Stars themselves. Requests of that kind go to Telegram or to your app store, not to
+the bot.
 
 ## 5. Limits
 
@@ -91,9 +106,14 @@ bought in bad faith.
 
 ## 8. Data and privacy
 
-**Images are not kept.** Photos and zips exist only in temporary storage for the
-duration of one request and are deleted when it finishes. They are never stored in
-a database, never used to train anything, and never shared.
+**Images are never retained.** Photos and zips are written only to the temporary
+per-request storage of the function that processes them (`/tmp`), are deleted as
+soon as that request finishes, and are destroyed in any case when the short-lived
+compute instance is torn down. No copy survives after your result is sent.
+
+They are never written to a database, never used to train any model, never reviewed
+by a person, and never shared with or sold to third parties. The watermarked results
+are not kept either — once sent to you, the only copy is yours.
 
 What *is* stored:
 
@@ -113,9 +133,11 @@ forfeits unused credits.
 ## 9. Availability and changes
 
 The bot is provided as-is, with no guarantee of availability. It may be changed,
-interrupted, or discontinued at any time. If it is discontinued permanently,
-holders of unused credits will be offered a refund through Telegram where Telegram
-still permits it.
+interrupted, or discontinued at any time.
+
+If it is discontinued permanently, reasonable notice will be given where that is
+possible, after which unused credits stop being usable and are not refunded. Buy
+the pack that matches what you realistically expect to use.
 
 ## 10. No warranty and limitation of liability
 
@@ -132,12 +154,16 @@ Nothing here removes rights you have under consumer law that cannot be waived.
 
 ## 11. Support and disputes
 
-Use `/paysupport` in the bot for anything about payments, credits or refunds, and
-`/terms` to see this document. `/paysupport` reaches:
+Use `/paysupport` in the bot for questions about payments, credits or your balance,
+and `/terms` to see this document. Note that purchases are final (section 4), so
+`/paysupport` is for questions and for billing mistakes, not for refund requests.
+`/paysupport` reaches:
 
 **Victor Puchkarev — <victor.puchkarev@gmail.com>**
 
-Please include which pack you bought and roughly when, so the purchase can be found.
+Please include which pack you bought and roughly when, so the purchase can be
+found. Billing mistakes — such as being charged for images the bot never delivered
+— will be put right.
 
 For bugs and feature requests, the public issue tracker is
 <https://github.com/puchkarev/watermarker/issues>. **Do not post payment details,
