@@ -83,11 +83,19 @@ class TestDailyQuota(unittest.TestCase):
 
     def test_batch_bigger_than_what_is_left_is_refused_whole(self):
         self.quota.reserve(FREE_CHAT, 7)
-        message = self.quota.reserve(FREE_CHAT, 20)
-        self.assertIn("this has 20 images but you have 3 of your 10 images left today", message)
-        self.assertIn("nothing was processed", message)
+        message = self.quota.reserve(FREE_CHAT, 5)
+        self.assertEqual(message, "That zip contains 5 images, but you have 3 of your 10 left today. "
+                                  "Nothing was processed - your allowance resets at 00:00 UTC (in 1h 30m).")
         self.assertEqual(self.db.total(f"chat#{FREE_CHAT}#2026-09-26"), 7)
         self.assertEqual(self.db.total("system#2026-09-26"), 7)
+
+    def test_batch_bigger_than_the_whole_allowance_says_so(self):
+        # Retrying tomorrow wouldn't help, so the message doesn't suggest it
+        message = self.quota.reserve(FREE_CHAT, 20)
+        self.assertEqual(message, "That zip contains 20 images, which is more than your daily allowance of 10. "
+                                  "Try splitting it into smaller zips.")
+        self.assertEqual(self.db.total(f"chat#{FREE_CHAT}#2026-09-26"), 0)
+        self.assertEqual(self.db.total("system#2026-09-26"), 0)
 
     def test_unlimited_chat_skips_personal_limit_but_not_system(self):
         quota = _quota(self.db, system=50)
@@ -96,7 +104,12 @@ class TestDailyQuota(unittest.TestCase):
         message = quota.reserve(UNLIMITED_CHAT, 20)
         self.assertIn("across all users", message)
         self.assertNotIn("your 10 images", message)
-        self.assertIn("10 left and this has 20", message)
+        self.assertEqual(message, "That zip contains 20 images, but the bot has 10 of its daily 50 left across "
+                                  "all users. Nothing was processed - please try again after 00:00 UTC (in 1h 30m).")
+        self.assertEqual(quota.reserve(UNLIMITED_CHAT, 60),
+                         "That zip contains 60 images, which is more than the bot's daily limit of 50 across "
+                         "all users. Try splitting it into smaller zips.")
+        self.assertEqual(self.db.total("system#2026-09-26"), 40)
 
     def test_system_limit_names_the_system_quota(self):
         quota = _quota(self.db, system=12)
@@ -259,7 +272,7 @@ class TestQuotaInTheBot(unittest.TestCase):
             watermarker.process_document("t", FREE_CHAT, {"file_id": "z", "file_name": "b.zip"})
         apply.assert_not_called()
         self.assertEqual(self.sent_docs, [])
-        self.assertIn("this has 5 images but you have 3 of your 10", self.messages[-1])
+        self.assertIn("That zip contains 5 images, but you have 3 of your 10 left today", self.messages[-1])
         self.assertEqual(self._chat_total(), 7)
         self.assertEqual(os.listdir(watermarker.TEMP_DIR), [])
 

@@ -74,21 +74,26 @@ class DailyQuota:
 
     def _user_message(self, used_before, count):
         left = max(0, self.free_daily - used_before)
+        if count > self.free_daily:
+            # Would be refused every day, so say that rather than today's remainder
+            return (f"That zip contains {count} images, which is more than your daily allowance of "
+                    f"{self.free_daily}. Try splitting it into smaller zips.")
         if left == 0:
             return (f"Daily limit reached: you've used {self.free_daily} of your {self.free_daily} images today. "
                     f"Your allowance resets at {self._resets_in()}.")
-        return (f"Daily limit: this has {count} images but you have {left} of your {self.free_daily} "
-                f"images left today, so nothing was processed. Send {left} or fewer, "
-                f"or try again after your allowance resets at {self._resets_in()}.")
+        return (f"That zip contains {count} images, but you have {left} of your {self.free_daily} left today. "
+                f"Nothing was processed - your allowance resets at {self._resets_in()}.")
 
     def _system_message(self, used_before, count):
         left = max(0, self.system_daily - used_before)
+        if count > self.system_daily:
+            return (f"That zip contains {count} images, which is more than the bot's daily limit of "
+                    f"{self.system_daily} across all users. Try splitting it into smaller zips.")
         if left == 0:
             return (f"The bot has reached its daily limit of {self.system_daily} images across all users. "
                     f"Please try again after {self._resets_in()}.")
-        return (f"The bot is close to its daily limit of {self.system_daily} images across all users: "
-                f"{left} left and this has {count}, so nothing was processed. "
-                f"Please try again after {self._resets_in()}.")
+        return (f"That zip contains {count} images, but the bot has {left} of its daily {self.system_daily} "
+                f"left across all users. Nothing was processed - please try again after {self._resets_in()}.")
 
     # --- the interface watermarker.QUOTA uses ---
 

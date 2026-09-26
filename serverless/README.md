@@ -163,8 +163,9 @@ bounded while leaving the bot open:
 
 - One photo counts 1 and a zip of 20 images counts 20. Commands and `/source` are free.
 - Only images that are delivered count. Failed images are handed back.
-- A zip bigger than what's left today is refused whole, with a reply saying how
-  many images are left. The reply always says whether it was the person's own
+- A zip bigger than what's left today is refused whole and nothing is used up;
+  the reply gives the zip's image count and how many are left. A zip bigger than
+  the whole daily allowance is told to split it, since it would never fit. The reply always says whether it was the person's own
   limit or the bot's overall limit, and when it resets (00:00 UTC).
 - The counters live in a small DynamoDB table (free tier at this volume). Each
   day's rows delete themselves.
