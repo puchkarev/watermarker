@@ -21,9 +21,11 @@ Parameters:
   MemorySize:
     Type: Number
     Default: 2048
-    MinValue: 512
+    # One 8MP job peaks at ~435-450MB, and the runtime plus libraries need a further
+    # ~200MB, so below 1024 a single photo cannot be processed even one at a time.
+    MinValue: 1024
     MaxValue: 10240
-    Description: Lambda memory in MB (CPU scales with it)
+    Description: Lambda memory in MB (CPU scales with it; 1024 is the practical floor)
 
 Resources:
   StateBucket:
