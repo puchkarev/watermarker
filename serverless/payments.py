@@ -34,6 +34,7 @@ PAYLOAD_PREFIX = "images-v1:"
 PAYMENT_COMMANDS = {
     "balance": "Show your free images left this month and bought images",
     "buy": "Buy more images with Telegram Stars",
+    "usecredits": "Use bought images today if the bot's free images run out",
     "terms": "Terms and conditions",
     "paysupport": "Help with payments and billing",
 }
@@ -74,14 +75,25 @@ PAYSUPPORT_TEXT = (
 
 
 class TelegramError(Exception):
-    pass
+    """Telegram answered, and refused: nothing happened."""
+
+
+class TelegramUnknown(Exception):
+    """No definite answer (connection error, timeout, a server error, or a response that
+    isn't Telegram's): the call may or may not have taken effect."""
 
 
 def _call(bot_token, method, payload):
-    response = requests.post(TELEGRAM_API.format(token=bot_token, method=method), json=payload, timeout=10)
-    body = response.json()
+    try:
+        response = requests.post(TELEGRAM_API.format(token=bot_token, method=method), json=payload, timeout=10)
+        body = response.json()
+    except Exception as e:
+        raise TelegramUnknown(f"{method}: no answer from Telegram ({e})") from e
     if not body.get("ok"):
-        raise TelegramError(f"{method} failed: {body.get('description', response.status_code)}")
+        code = body.get("error_code", response.status_code)
+        if isinstance(code, int) and code >= 500:
+            raise TelegramUnknown(f"{method}: Telegram server error {code} ({body.get('description')})")
+        raise TelegramError(f"{method} failed: {body.get('description', code)}")
     return body.get("result")
 
 

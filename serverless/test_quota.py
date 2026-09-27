@@ -39,17 +39,20 @@ class FakeDynamo:
     """Just enough of DynamoDB for quota.py: atomic ADD with UPDATED_NEW, the
     "images >= :need" condition, GetItem, and TransactWriteItems."""
 
-    def __init__(self):
+    def __init__(self, page_size=None):
         self.items = {}
         self.lock = threading.Lock()
+        self.page_size = page_size  # set to exercise Query/Scan pagination
 
     @staticmethod
     def _key(Key):
         assert {"pk", "sk"} <= set(Key), Key
         return Key["pk"]["S"], Key["sk"]["S"]
 
-    def update_item(self, TableName, Key, UpdateExpression, ExpressionAttributeValues, ReturnValues=None,
+    def update_item(self, TableName, Key, UpdateExpression, ExpressionAttributeValues=None, ReturnValues=None,
                     ConditionExpression=None):
+        if not UpdateExpression.startswith("ADD images"):
+            return self._update_refunded(Key, UpdateExpression, ExpressionAttributeValues, ConditionExpression)
         assert UpdateExpression.startswith("ADD images :n")
         sets_expiry = "SET expires_at = if_not_exists(expires_at, :exp)" in UpdateExpression
         assert sets_expiry == (":exp" in ExpressionAttributeValues), UpdateExpression
@@ -66,6 +69,54 @@ class FakeDynamo:
                 item.setdefault("expires_at", int(ExpressionAttributeValues[":exp"]["N"]))
             item["images"] += delta
             return {"Attributes": {"images": {"N": str(item["images"])}}}
+
+    def _update_refunded(self, Key, UpdateExpression, values, condition):
+        """SET x = :v / REMOVE y on the refund attributes, with attribute_(not_)exists conditions."""
+        key = self._key(Key)
+        with self.lock:
+            item = self.items.get(key)
+            for clause in (condition or "").split(" AND ") if condition else []:
+                name = clause[clause.index("(") + 1:-1]
+                present = item is not None and (name == "pk" or name in item)
+                if clause.startswith("attribute_exists") != present:
+                    raise _ClientError("ConditionalCheckFailedException")
+            item = self.items.setdefault(key, {})
+            parts = UpdateExpression.split(" REMOVE ")
+            if parts[0].startswith("SET "):
+                name, value = parts[0][len("SET "):].split(" = ")
+                item[name] = values[value]["S"]
+                removes = parts[1:]
+            else:
+                removes = [parts[0][len("REMOVE "):]]
+            for name in removes:
+                item.pop(name, None)
+
+    @staticmethod
+    def _typed(key, item):
+        typed = {"pk": {"S": key[0]}, "sk": {"S": key[1]}}
+        typed.update({k: {"N": str(v)} if isinstance(v, int) else {"S": v} for k, v in item.items()})
+        return typed
+
+    def _page(self, rows, start):
+        rows = sorted(rows)
+        if start:
+            rows = [r for r in rows if r > (start["pk"]["S"], start["sk"]["S"])]
+        page = rows[:self.page_size] if self.page_size else rows
+        result = {"Items": [self._typed(k, self.items[k]) for k in page]}
+        if self.page_size and len(rows) > self.page_size:
+            last = page[-1]
+            result["LastEvaluatedKey"] = {"pk": {"S": last[0]}, "sk": {"S": last[1]}}
+        return result
+
+    def query(self, TableName, KeyConditionExpression, ExpressionAttributeValues, ExclusiveStartKey=None):
+        assert KeyConditionExpression == "pk = :pk"
+        pk = ExpressionAttributeValues[":pk"]["S"]
+        with self.lock:
+            return self._page([k for k in self.items if k[0] == pk], ExclusiveStartKey)
+
+    def scan(self, TableName, ExclusiveStartKey=None):
+        with self.lock:
+            return self._page(list(self.items), ExclusiveStartKey)
 
     def transact_write_items(self, TransactItems):
         with self.lock:
@@ -528,6 +579,27 @@ class TestBoughtCredits(unittest.TestCase):
         # Only possible when the balance was re-read higher than the failed take saw it
         message = self.quota._user_message(0, 99, 20)
         self.assertEqual(message, "Your balance changed while this zip was being checked. Please send it again.")
+
+    def test_monthly_history_counts_every_image_given_and_never_expires(self):
+        self._buy(30)
+        self.quota.reserve(FREE_CHAT, 25)  # 10 free + 15 bought
+        self.quota.release(FREE_CHAT, 5)
+        self.quota.reserve(UNLIMITED_CHAT, 7)
+        history = self.db.items[(f"chat#{FREE_CHAT}", "images#2026-09")]
+        self.assertEqual(history, {"images": 20})  # no expires_at: it's the usage history
+        self.assertEqual(self.db.total((f"chat#{UNLIMITED_CHAT}", "images#2026-09")), 7)
+
+    def test_history_failure_never_fails_the_job(self):
+        original = self.db.update_item
+
+        def history_down(**kwargs):
+            if kwargs["Key"]["sk"]["S"].startswith("images#"):
+                raise _ClientError("InternalServerError")
+            return original(**kwargs)
+        self.db.update_item = history_down
+        with patch("builtins.print"):
+            self.assertIsNone(self.quota.reserve(FREE_CHAT, 3))
+        self.assertEqual(self.db.total(USAGE), 3)
 
     def test_other_transaction_failures_are_raised_not_treated_as_duplicates(self):
         def conflict(**kwargs):

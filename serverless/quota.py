@@ -45,10 +45,14 @@ Items (pk / sk):
                                       its write is what makes crediting idempotent
     chat#<id> / credits-when-capped#<day>
                                       the chat's /usecredits consent for that day
+    chat#<id> / images#2026-09        every image the chat was given that month,
+                                      free or bought: its usage history
+    chat#<id> / grant#<timestamp>     images an admin added (admin.py), with who and why
 Usage rows carry expires_at (epoch seconds) so DynamoDB TTL deletes them once
-their period and the one after it are over; a consent row, once its day is over. Balance and charge rows have no
-expires_at at all, so TTL can never touch them. Keying by owner then record type
-keeps everything about one chat in one partition, readable with a single Query.
+their period and the one after it are over; a consent row, once its day is over.
+Balance, charge, images and grant rows have no expires_at at all, so TTL never
+touches them. Keying by owner then record type keeps everything about one chat in
+one partition, readable with a single Query.
 """
 from datetime import datetime, timedelta, timezone
 
@@ -76,6 +80,11 @@ def _expires_at(key):
         start = datetime.strptime(period, "%Y-%m-%d").replace(tzinfo=timezone.utc)
         end = start + timedelta(days=2)
     return int(end.timestamp())
+
+
+def _attributes(item):
+    """A DynamoDB item's attributes as plain values (N as int, S as str), keys dropped."""
+    return {k: int(v["N"]) if "N" in v else v.get("S") for k, v in item.items() if k not in ("pk", "sk")}
 
 
 def _error_code(e):
@@ -297,7 +306,7 @@ class ImageQuota:
                 self._refund(system_key, count)
                 self._log(chat_id, count, "system", system_total - count, None, 0)
                 return self._system_message(system_total - count, count)
-            self._reserved[str(chat_id)] = {"period": period, "free": count, "paid": 0}
+            self._granted(chat_id, period, count, 0)
             self._log(chat_id, count, None, system_total, None, 0)
             return None
 
@@ -341,7 +350,7 @@ class ImageQuota:
                 return self._user_message(free_left, self.balance(chat_id), count)
             taken["paid"] = paid
 
-        self._reserved[str(chat_id)] = {"period": period, "free": free, "paid": paid}
+        self._granted(chat_id, period, free, paid)
         self._log(chat_id, count, None, system_total, used_before + free, paid)
         return None
 
@@ -353,12 +362,24 @@ class ImageQuota:
         if balance >= count and self.uses_credits_when_capped(chat_id, period[0]):
             if self._take_balance(chat_id, count):
                 taken["paid"] = count
-                self._reserved[str(chat_id)] = {"period": period, "free": 0, "paid": count}
+                self._granted(chat_id, period, 0, count)
                 self._log(chat_id, count, None, system_total, used_before, count)
                 return None
             balance = self.balance(chat_id)
         self._log(chat_id, count, "system", system_total, used_before, 0)
         return self._capped_message(free_left, balance, count)
+
+    def _granted(self, chat_id, period, free, paid):
+        self._reserved[str(chat_id)] = {"period": period, "free": free, "paid": paid}
+        self._count_images(chat_id, period[1], free + paid)
+
+    def _count_images(self, chat_id, month, count):
+        """Usage history for the admin commands. Not part of any limit, so a failure
+        here is logged and never fails or refunds the job."""
+        try:
+            self._add((f"chat#{chat_id}", f"images#{month}"), count)
+        except Exception as e:
+            print(f"quota history update failed chat={chat_id} images={count}: {e}")
 
     def _take_balance(self, chat_id, count):
         """Spend count bought images. A failed conditional update is re-checked, because a
@@ -427,6 +448,8 @@ class ImageQuota:
             self._refund(system_key, free)
             if not self.is_unlimited(chat_id):
                 self._refund(chat_key, free)
+        month = (reservation["period"] or (None, self.now().strftime("%Y-%m")))[1]
+        self._count_images(chat_id, month, -(free + paid))
         print(f"quota release chat={chat_id} images={count} free={free} paid={paid}")
 
     def check(self, chat_id):
@@ -444,6 +467,126 @@ class ImageQuota:
         if free_left:
             return self._capped_message(free_left, 0, 1)
         return self._user_message(0, 0, 1)
+
+    # --- reads and changes for the admin commands (admin.py) ---
+
+    def chat_records(self, chat_id):
+        """Every row of one chat, {sk: attributes}: a single Query thanks to the sort key."""
+        records, start = {}, None
+        while True:
+            kwargs = {"TableName": self.table, "KeyConditionExpression": "pk = :pk",
+                      "ExpressionAttributeValues": {":pk": {"S": f"chat#{chat_id}"}}}
+            if start:
+                kwargs["ExclusiveStartKey"] = start
+            page = self.db.query(**kwargs)
+            for item in page.get("Items", []):
+                records[item["sk"]["S"]] = _attributes(item)
+            start = page.get("LastEvaluatedKey")
+            if not start:
+                return records
+
+    def all_records(self):
+        """Every row in the table as (pk, sk, attributes). A Scan: fine at this bot's
+        size, and only ever run by an admin command."""
+        start = None
+        while True:
+            kwargs = {"TableName": self.table}
+            if start:
+                kwargs["ExclusiveStartKey"] = start
+            page = self.db.scan(**kwargs)
+            for item in page.get("Items", []):
+                yield item["pk"]["S"], item["sk"]["S"], _attributes(item)
+            start = page.get("LastEvaluatedKey")
+            if not start:
+                return
+
+    def system_used_today(self):
+        return self._get(self._keys(0)[0])
+
+    def charge(self, charge_id):
+        item = self.db.get_item(TableName=self.table,
+                                Key=self._item_key((f"charge#{charge_id}", "charge"))).get("Item")
+        return _attributes(item) if item else None
+
+    def grant(self, chat_id, images, admin, reason):
+        """Add images to a chat's balance without a payment, recorded like a purchase so
+        the chat's history shows where its balance came from. Returns the new balance."""
+        when = self.now().isoformat()
+        self.db.put_item(TableName=self.table, Item={
+            "pk": {"S": f"chat#{chat_id}"}, "sk": {"S": f"grant#{when}"}, "images": {"N": str(images)},
+            "admin": {"S": str(admin)}, "reason": {"S": reason}, "ts": {"S": when}})
+        return self._add(self._balance_key(chat_id), images)
+
+    # A refund goes through two recorded states, because the Telegram call in between
+    # can fail in a way that says nothing about whether the Stars moved:
+    #   begin_refund   refund_pending is set before Telegram is called
+    #   finish_refund  refunded is set (once, conditionally) after Telegram confirms
+    #   abandon_refund refund_pending is cleared after Telegram definitively refuses
+    # A charge left pending is finished by simply trying again: Telegram never pays a
+    # charge twice (it answers CHARGE_ALREADY_REFUNDED), and only one finish_refund can
+    # win, so the images are taken back exactly once.
+
+    def begin_refund(self, charge_id, chat_id):
+        """Mark a refund as in progress. False if the charge doesn't exist or is already
+        refunded; an earlier pending attempt is resumed."""
+        if not self._update_charge(charge_id, "SET refund_pending = :when",
+                                   "attribute_exists(pk) AND attribute_not_exists(refunded)"):
+            return False
+        self._mirror(charge_id, chat_id, "SET refund_pending = :when")
+        return True
+
+    def finish_refund(self, charge_id, chat_id):
+        """Record the refund as done. True only for the one call that records it."""
+        if not self._update_charge(charge_id, "SET refunded = :when REMOVE refund_pending",
+                                   "attribute_exists(pk) AND attribute_not_exists(refunded)"):
+            return False
+        self._mirror(charge_id, chat_id, "SET refunded = :when REMOVE refund_pending")
+        return True
+
+    def abandon_refund(self, charge_id, chat_id):
+        """Clear a pending refund that Telegram refused. Never raises: if it fails the
+        charge stays pending, which the next attempt resolves, and the log says which."""
+        try:
+            self.db.update_item(TableName=self.table, Key=self._item_key((f"charge#{charge_id}", "charge")),
+                                UpdateExpression="REMOVE refund_pending")
+        except Exception as e:
+            print(f"REFUND ROLLBACK FAILED charge={charge_id} (it stays pending; /refund resolves it): {e}")
+            return
+        self._mirror(charge_id, chat_id, "REMOVE refund_pending")
+
+    def _mirror(self, charge_id, chat_id, expression):
+        # The chat's copy is for display (/charges); the charge row is the source of truth
+        kwargs = {"TableName": self.table, "Key": self._item_key((f"chat#{chat_id}", f"charge#{charge_id}")),
+                  "UpdateExpression": expression}
+        if ":when" in expression:
+            kwargs["ExpressionAttributeValues"] = {":when": {"S": self.now().isoformat()}}
+        try:
+            self.db.update_item(**kwargs)
+        except Exception as e:
+            print(f"refund state on the chat's copy failed chat={chat_id} charge={charge_id}: {e}")
+
+    def _update_charge(self, charge_id, expression, condition):
+        try:
+            self.db.update_item(
+                TableName=self.table, Key=self._item_key((f"charge#{charge_id}", "charge")),
+                UpdateExpression=expression, ConditionExpression=condition,
+                ExpressionAttributeValues={":when": {"S": self.now().isoformat()}})
+            return True
+        except Exception as e:
+            if _error_code(e) == "ConditionalCheckFailedException":
+                return False
+            raise
+
+    def deduct(self, chat_id, images):
+        """Take up to images from the balance, never below zero.
+        Returns (images actually taken, balance after)."""
+        key = self._balance_key(chat_id)
+        total = self._add(key, -images)
+        if total >= 0:
+            return images, total
+        # Part of the pack was already spent: stop at zero rather than owing images
+        self._add(key, -total)
+        return images + total, 0
 
     def _log(self, chat_id, count, blocked, system_total, chat_total, paid):
         # One line per request: per-chat usage accounting for the logs

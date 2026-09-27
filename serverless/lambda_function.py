@@ -25,6 +25,8 @@ Environment variables:
     FREE_DAILY_IMAGES     deprecated name, read only when FREE_MONTHLY_IMAGES is unset (now per month)
     SYSTEM_DAILY_IMAGES   images per UTC day for the whole deployment (default 5000)
     UNLIMITED_CHAT_IDS    comma-separated chat ids with no personal limit (the system limit still applies)
+    ADMIN_CHAT_IDS        comma-separated chat ids that may use the admin commands (admin.py);
+                          a separate privilege from UNLIMITED_CHAT_IDS, empty means no admins
     ALLOWED_CHAT_IDS  deprecated: comma-separated chat ids; when set, every other chat is refused
                       and the listed chats are treated as unlimited, as they were before quotas
 """
@@ -42,6 +44,7 @@ for _path in (_HERE, os.path.dirname(_HERE)):
     if os.path.exists(os.path.join(_path, "watermarker.py")) and _path not in sys.path:
         sys.path.insert(0, _path)
 
+import admin
 import payments
 import watermarker
 from quota import ImageQuota
@@ -264,7 +267,10 @@ def run_task(event):
     _prepare_work_dir()
     try:
         watermarker.QUOTA = quota = _quota()
-        watermarker.EXTRA_COMMANDS = lambda token, chat, text: payments.handle_command(token, chat, text, quota)
+        admins = _id_set("ADMIN_CHAT_IDS")
+        watermarker.EXTRA_COMMANDS = lambda token, chat, text: (
+            payments.handle_command(token, chat, text, quota)
+            or admin.handle_command(token, chat, text, quota, admins))
         watermarker.EXTRA_HELP = payments.HELP_TEXT
         before = pull_state(bucket, chat_id)
         watermarker.handle_update(bot_token, update)

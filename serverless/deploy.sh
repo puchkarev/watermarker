@@ -15,6 +15,7 @@
 # Options:
 #   --bot-token TOKEN        Telegram bot token (asked for on first deploy; kept on later deploys)
 #   --unlimited-chat-ids IDS comma-separated chat ids with no personal monthly limit
+#   --admin-chat-ids IDS     comma-separated chat ids that may use the admin commands (/admin)
 #   --free-monthly-images N  images per UTC month for every other chat (default 10)
 #   --system-daily-images N  images per UTC day for the whole bot (default 5000)
 #   --allowed-chat-ids IDS   deprecated hard allowlist; pass "" to clear it
@@ -37,11 +38,13 @@ ALLOWED_CHAT_IDS=""
 ALLOWED_SET="false"
 UNLIMITED_CHAT_IDS=""
 UNLIMITED_SET="false"
+ADMIN_CHAT_IDS=""
+ADMIN_SET="false"
 FREE_MONTHLY=""
 SYSTEM_DAILY=""
 MEMORY=""
 
-usage() { sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; }
 info() { echo "==> $*"; }
 fail() { echo "Error: $*" >&2; exit 1; }
 
@@ -53,6 +56,7 @@ while [[ $# -gt 0 ]]; do
         --bot-token) BOT_TOKEN_ARG="${2:?--bot-token needs a value}"; shift 2 ;;
         --allowed-chat-ids) ALLOWED_CHAT_IDS="${2-}"; ALLOWED_SET="true"; shift 2 ;;
         --unlimited-chat-ids) UNLIMITED_CHAT_IDS="${2-}"; UNLIMITED_SET="true"; shift 2 ;;
+        --admin-chat-ids) ADMIN_CHAT_IDS="${2-}"; ADMIN_SET="true"; shift 2 ;;
         --free-monthly-images) FREE_MONTHLY="${2:?--free-monthly-images needs a value}"; shift 2 ;;
         --free-daily-images) fail "--free-daily-images was replaced by --free-monthly-images (the free allowance is now per month)" ;;
         --system-daily-images) SYSTEM_DAILY="${2:?--system-daily-images needs a value}"; shift 2 ;;
@@ -126,7 +130,7 @@ build_package() {
         -r "$SCRIPT_DIR/requirements.txt"
 
     cp "$REPO_DIR/watermarker.py" "$REPO_DIR/watermarker_core.py" "$REPO_DIR/sun.webp" \
-       "$SCRIPT_DIR/lambda_function.py" "$SCRIPT_DIR/quota.py" "$SCRIPT_DIR/payments.py" "$BUILD_DIR/pkg/"
+       "$SCRIPT_DIR/lambda_function.py" "$SCRIPT_DIR/quota.py" "$SCRIPT_DIR/payments.py" "$SCRIPT_DIR/admin.py" "$BUILD_DIR/pkg/"
     cp "$tele" "$BUILD_DIR/pkg/submodules/telegram/"
 
     (cd "$BUILD_DIR/pkg" && zip -qr9 "$PACKAGE" . -x '*__pycache__*')
@@ -153,6 +157,7 @@ cmd_deploy() {
     if [[ -n "$bot_token" ]]; then params+=("BotToken=$bot_token"); fi
     if [[ "$ALLOWED_SET" == "true" ]]; then params+=("AllowedChatIds=$ALLOWED_CHAT_IDS"); fi
     if [[ "$UNLIMITED_SET" == "true" ]]; then params+=("UnlimitedChatIds=$UNLIMITED_CHAT_IDS"); fi
+    if [[ "$ADMIN_SET" == "true" ]]; then params+=("AdminChatIds=$ADMIN_CHAT_IDS"); fi
     if [[ -n "$FREE_MONTHLY" ]]; then params+=("FreeMonthlyImages=$FREE_MONTHLY"); fi
     if [[ -n "$SYSTEM_DAILY" ]]; then params+=("SystemDailyImages=$SYSTEM_DAILY"); fi
     if [[ -n "$MEMORY" ]]; then params+=("MemorySize=$MEMORY"); fi
@@ -257,6 +262,7 @@ cmd_status() {
     echo "Free images:   $(function_env FREE_MONTHLY_IMAGES) per chat per month"
     echo "System cap:    $(function_env SYSTEM_DAILY_IMAGES) per day for the whole bot"
     echo "Unlimited:     $(function_env UNLIMITED_CHAT_IDS)"
+    echo "Admins:        $(function_env ADMIN_CHAT_IDS)"
     echo "Allowed chats: $(function_env ALLOWED_CHAT_IDS) (deprecated allowlist; empty = quotas apply to everyone)"
     echo "Telegram webhook info:"
     curl -sS "https://api.telegram.org/bot$(function_env BOT_TOKEN)/getWebhookInfo" | python3 -m json.tool

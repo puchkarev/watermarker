@@ -23,12 +23,21 @@ class FakeTelegram:
     def __init__(self):
         self.calls = []
         self.allowed_updates = ["message", "pre_checkout_query"]
+        self.refuse = {}  # method -> Telegram's error description, or (description, error code)
+        self.unreachable = set()  # methods whose call gets no answer at all
 
     def post(self, url, json=None, timeout=None):
         method = url.rsplit("/", 1)[-1]
         self.calls.append((method, json))
-        result = {"allowed_updates": self.allowed_updates} if method == "getWebhookInfo" else True
         response = MagicMock()
+        if method in self.unreachable:
+            raise ConnectionError("Read timed out")
+        if method in self.refuse:
+            description, code = (self.refuse[method], 400) if isinstance(self.refuse[method], str) \
+                else self.refuse[method]
+            response.json.return_value = {"ok": False, "description": description, "error_code": code}
+            return response
+        result = {"allowed_updates": self.allowed_updates} if method == "getWebhookInfo" else True
         response.json.return_value = {"ok": True, "result": result}
         return response
 
