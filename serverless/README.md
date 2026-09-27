@@ -207,6 +207,9 @@ checkout needs.
   expire and aren't limited by the bot's daily cap.
 - A zip needing more than free + bought images is refused whole, with how many it's
   short. Failed images go back to where they came from, bought ones first.
+- On a day the bot's free images run out, a chat that still has free images left
+  isn't switched to bought ones without asking: it is told so, and `/usecredits`
+  allows it for the rest of that day.
 - `/balance` shows both, `/terms` summarises [TERMS.md](../TERMS.md) (all purchases
   are final), and `/paysupport` gives the billing contact.
 - Each payment is credited exactly once, even when Telegram delivers it twice, and

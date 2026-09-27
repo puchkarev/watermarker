@@ -42,6 +42,8 @@ HELP_TEXT = (
     "\n\nImages:\n"
     "/balance - Show your free images left this month and the images you've bought.\n"
     "/buy - Buy more images with Telegram Stars.\n"
+    "/usecredits - If the bot's free images for the day run out, use your bought images instead "
+    "(for the rest of the day).\n"
     "/terms - Terms and conditions.\n"
     "/paysupport - Help with payments and billing."
 )
@@ -170,8 +172,13 @@ def handle_successful_payment(bot_token, message, quota):
         print(f"PAYMENT NOT CREDITED chat={chat_id} user={user_id} charge={charge_id} "
               f"payload={payment.get('invoice_payload')} amount={payment.get('total_amount')} "
               f"quota={'on' if quota else 'off'}")
-        _send(bot_token, chat_id, "Your payment went through, but it couldn't be added to your balance "
-                                  f"automatically. Please email {SUPPORT_EMAIL} and it will be put right.")
+        # This condition is permanent, so the notice must not raise: a 500 would have Telegram
+        # redeliver the payment forever. The line above is what the operator needs anyway.
+        try:
+            _send(bot_token, chat_id, "Your payment went through, but it couldn't be added to your balance "
+                                      f"automatically. Please email {SUPPORT_EMAIL} and it will be put right.")
+        except Exception as e:
+            print(f"PAYMENT NOT CREDITED and the notice failed chat={chat_id} charge={charge_id}: {e}")
         return
 
     images = PACKS[pack]["images"]
@@ -209,9 +216,20 @@ def handle_command(bot_token, chat_id, text, quota):
               else _balance_text(quota, chat_id))
     elif command == "/buy":
         _buy(bot_token, chat_id, quota)
+    elif command == "/usecredits":
+        _use_credits(bot_token, chat_id, quota)
     else:
         return False
     return True
+
+
+def _use_credits(bot_token, chat_id, quota):
+    if quota is None or quota.is_unlimited(chat_id):
+        _send(bot_token, chat_id, "This chat doesn't use bought images, so there's nothing to change.")
+        return
+    until = quota.use_credits_when_capped(chat_id)
+    _send(bot_token, chat_id, "OK. Until " + until + ", if the bot's free images for the day are used up, "
+                              "your bought images will be used instead. Send your zip again.")
 
 
 def _buy(bot_token, chat_id, quota):

@@ -223,13 +223,19 @@ for arg in sys.argv[1:]:
     path, name = arg.rsplit(":", 1)
     for node in ast.parse(open(path).read()).body:
         if isinstance(node, ast.Assign) and any(getattr(t, "id", None) == name for t in node.targets):
-            commands.update(ast.literal_eval(node.value))
+            found = ast.literal_eval(node.value)
+            break
+    else:
+        # An empty list would clear the bot's menu, so a renamed constant must stop here
+        sys.exit(f"{name} not found in {path}")
+    commands.update(found)
 print(json.dumps({"commands": [{"command": k, "description": v} for k, v in commands.items()]}))
 EOF
-)
+)   || fail "could not read the bot's command list (the menu was left unchanged)"
     info "Setting the bot's command menu"
     curl -sS -X POST "https://api.telegram.org/bot$token/setMyCommands" \
-        -H 'Content-Type: application/json' -d "$commands" | telegram_check || true
+        -H 'Content-Type: application/json' -d "$commands" | telegram_check \
+        || echo "   Warning: Telegram rejected the command menu; the bot works, but its menu may be out of date." >&2
 
     echo "   Note: while the webhook is set, a polling copy of watermarker.py using the"
     echo "   same bot token gets errors from Telegram. Use '$0 detach' to switch back."

@@ -11,6 +11,11 @@ not count towards the system cap - once someone has paid, a busy day for free
 users must not turn them away - so the cap only ever limits free usage. A job
 that needs more than free + balance is refused whole, and nothing is taken.
 
+One case needs the user's say-so: a chat with free images left on a day the cap
+is reached. Running its job on bought images instead would spend money it
+expected not to spend, so it is refused with an explanation until the chat
+sends /usecredits, which allows it for the rest of that UTC day.
+
 Counters are DynamoDB items updated with an atomic ADD, because many workers run
 at once (every zip in a batch is its own invocation) and a read-modify-write
 would lose increments exactly under the load the quota exists to control.
@@ -38,8 +43,10 @@ Items (pk / sk):
     chat#<id> / charge#<charge id>    one purchase, for listing a chat's history
     charge#<charge id> / charge       the same purchase, found by charge id alone:
                                       its write is what makes crediting idempotent
+    chat#<id> / credits-when-capped#<day>
+                                      the chat's /usecredits consent for that day
 Usage rows carry expires_at (epoch seconds) so DynamoDB TTL deletes them once
-their period and the one after it are over. Balance and charge rows have no
+their period and the one after it are over; a consent row, once its day is over. Balance and charge rows have no
 expires_at at all, so TTL can never touch them. Keying by owner then record type
 keeps everything about one chat in one partition, readable with a single Query.
 """
@@ -231,6 +238,9 @@ class ImageQuota:
 
     def _user_message(self, free_left, balance, count):
         available = free_left + balance
+        if available >= count:
+            # Only reachable if the balance grew after the reservation failed
+            return "Your balance changed while this zip was being checked. Please send it again."
         if available == 0:
             if self.free_monthly == 0:
                 return "This bot has no free image allowance for your chat. Buy images with /buy."
@@ -241,22 +251,35 @@ class ImageQuota:
                 f"+ {balance} bought), so it is {count - available} short. Nothing was processed - buy more "
                 f"with /buy, or split the zip. Your free allowance resets at {self.month_resets()}.")
 
-    def _system_message(self, used_before, count, can_buy=False):
-        left = max(0, self.system_daily - used_before)
-        # Bought images aren't limited by the system cap, so a chat that can buy is told so
-        hint = " Bought images aren't affected by this limit - see /buy." if can_buy else ""
+    def _capped_message(self, free_left, balance, count):
         if self.system_daily == 0:
-            return "This bot isn't processing free images at the moment (its daily limit is 0)." + hint
+            why = "This bot isn't processing free images at the moment (its daily limit is 0)"
+        else:
+            why = (f"The bot's free images for today are used up (its daily limit is {self.system_daily} "
+                   f"across all users), so your {free_left} free images this month can't be used until "
+                   f"{self._day_resets()}")
+        if balance >= count:
+            return (f"{why}. You have {balance} bought images: send /usecredits to use them for this zip "
+                    "and any others today, then send it again.")
+        if balance:
+            return (f"{why}. Your {balance} bought images aren't enough for this zip of {count} images "
+                    f"({count - balance} short) - buy more with /buy, or try again then.")
+        return f"{why}. Bought images aren't affected by this limit - see /buy."
+
+    def _system_message(self, used_before, count):
+        """For unlimited chats, which have no balance to fall back on."""
+        left = max(0, self.system_daily - used_before)
+        if self.system_daily == 0:
+            return "This bot isn't processing free images at the moment (its daily limit is 0)."
         if count > self.system_daily:
             return (f"That zip contains {count} images, which is more than the bot's daily limit of "
-                    f"{self.system_daily} free images across all users. Try splitting it into smaller zips."
-                    + hint)
+                    f"{self.system_daily} free images across all users. Try splitting it into smaller zips.")
         if left == 0:
             return (f"The bot has reached its daily limit of {self.system_daily} free images across all users. "
-                    f"Please try again after {self._day_resets()}." + hint)
+                    f"Please try again after {self._day_resets()}.")
         return (f"That zip contains {count} images, but the bot has {left} of its daily {self.system_daily} "
                 f"free images left across all users. Nothing was processed - please try again after "
-                f"{self._day_resets()}." + hint)
+                f"{self._day_resets()}.")
 
     # --- the interface watermarker.QUOTA uses ---
 
@@ -278,39 +301,110 @@ class ImageQuota:
             self._log(chat_id, count, None, system_total, None, 0)
             return None
 
+        # Everything this reservation has taken so far, handed back if a later step
+        # fails: an error must not strand a month of free allowance or bought credits
+        taken = {"chat": 0, "system": 0, "paid": 0}
+        try:
+            return self._reserve_limited(chat_id, count, period, taken)
+        except Exception:
+            self._undo(chat_id, period, taken)
+            raise
+
+    def _reserve_limited(self, chat_id, count, period, taken):
+        system_key, chat_key = self._keys(chat_id, period)
+
         # The usage row counts free images only: add the whole job, keep what fits
         chat_total = self._add(chat_key, count)
+        taken["chat"] = count
         free_left = max(0, self.free_monthly - (chat_total - count))
+        used_before = self.free_monthly - free_left
         free = min(count, free_left)
         if free < count:
             self._refund(chat_key, count - free)
+        taken["chat"] = free
 
         system_total = None
-        blocked_by_system = False
         if free:
             system_total = self._add(system_key, free)
+            taken["system"] = free
             if system_total > self.system_daily:
-                # The day's free images are gone: this job can still run on bought credits
-                self._refund(system_key, free)
-                self._refund(chat_key, free)
-                blocked_by_system, system_total, free = True, system_total - free, 0
+                self._undo(chat_id, period, taken)
+                return self._reserve_when_capped(chat_id, count, period, free_left, system_total - free,
+                                                 used_before, taken)
 
         paid = count - free
-        used_before = self.free_monthly - free_left
-        if paid and not self._take(self._balance_key(chat_id), paid):
-            if free:
-                self._refund(system_key, free)
-                self._refund(chat_key, free)
-                system_total -= free
-            if blocked_by_system:
-                self._log(chat_id, count, "system", system_total, used_before, 0)
-                return self._system_message(system_total, count, can_buy=True)
-            self._log(chat_id, count, "chat", system_total, used_before, 0)
-            return self._user_message(free_left, self.balance(chat_id), count)
+        if paid:
+            if not self._take_balance(chat_id, paid):
+                self._undo(chat_id, period, taken)
+                self._log(chat_id, count, "chat", None if system_total is None else system_total - free,
+                          used_before, 0)
+                return self._user_message(free_left, self.balance(chat_id), count)
+            taken["paid"] = paid
 
         self._reserved[str(chat_id)] = {"period": period, "free": free, "paid": paid}
         self._log(chat_id, count, None, system_total, used_before + free, paid)
         return None
+
+    def _reserve_when_capped(self, chat_id, count, period, free_left, system_total, used_before, taken):
+        """The chat has free images left, but the bot's free images for today are gone.
+        Bought images aren't limited by the cap, but using them in place of free ones
+        spends the user's money, so that only happens after they said yes (/usecredits)."""
+        balance = self.balance(chat_id)
+        if balance >= count and self.uses_credits_when_capped(chat_id, period[0]):
+            if self._take_balance(chat_id, count):
+                taken["paid"] = count
+                self._reserved[str(chat_id)] = {"period": period, "free": 0, "paid": count}
+                self._log(chat_id, count, None, system_total, used_before, count)
+                return None
+            balance = self.balance(chat_id)
+        self._log(chat_id, count, "system", system_total, used_before, 0)
+        return self._capped_message(free_left, balance, count)
+
+    def _take_balance(self, chat_id, count):
+        """Spend count bought images. A failed conditional update is re-checked, because a
+        parallel job of the same chat may have returned images since: retry while the
+        balance says it would now fit."""
+        key = self._balance_key(chat_id)
+        for _ in range(3):
+            if self._take(key, count):
+                return True
+            if self.balance(chat_id) < count:
+                return False
+        return False
+
+    def _undo(self, chat_id, period, taken):
+        """Hand back what a reservation in progress has taken (best effort, logged)."""
+        system_key, chat_key = self._keys(chat_id, period)
+        if taken["chat"]:
+            self._refund(chat_key, taken["chat"])
+        if taken["system"]:
+            self._refund(system_key, taken["system"])
+        if taken["paid"]:
+            try:
+                self._add(self._balance_key(chat_id), taken["paid"])
+            except Exception as e:
+                print(f"QUOTA BALANCE RETURN FAILED chat={chat_id} images={taken['paid']}: {e}")
+        taken.update(chat=0, system=0, paid=0)
+
+    # --- consent to use bought images when the free ones are capped ---
+
+    @staticmethod
+    def _consent_key(chat_id, day):
+        return f"chat#{chat_id}", f"credits-when-capped#{day}"
+
+    def use_credits_when_capped(self, chat_id):
+        """Record, for the rest of today (UTC), that this chat agrees to spend bought images
+        while the bot's daily free images are used up. The row deletes itself via TTL."""
+        now = self.now()
+        tomorrow = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        pk, sk = self._consent_key(chat_id, now.strftime("%Y-%m-%d"))
+        self.db.put_item(TableName=self.table, Item={
+            "pk": {"S": pk}, "sk": {"S": sk}, "expires_at": {"N": str(int(tomorrow.timestamp()))}})
+        return self._day_resets()
+
+    def uses_credits_when_capped(self, chat_id, day):
+        key = self._item_key(self._consent_key(chat_id, day))
+        return "Item" in self.db.get_item(TableName=self.table, Key=key)
 
     def release(self, chat_id, count):
         """Hand back images that were reserved but not delivered: bought ones first."""
@@ -348,7 +442,7 @@ class ImageQuota:
         if balance:
             return None
         if free_left:
-            return self._system_message(self.system_daily, 1, can_buy=True)
+            return self._capped_message(free_left, 0, 1)
         return self._user_message(0, 0, 1)
 
     def _log(self, chat_id, count, blocked, system_total, chat_total, paid):

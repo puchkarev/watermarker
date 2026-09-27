@@ -163,6 +163,14 @@ class TestSuccessfulPayment(PaymentTestCase):
         self.assertTrue(any("PAYMENT NOT CREDITED" in str(c) for c in mock_print.call_args_list))
         self.assertIn(payments.SUPPORT_EMAIL, self.telegram.texts()[0])
 
+    def test_failed_notice_for_an_uncreditable_payment_does_not_loop(self):
+        broken = MagicMock(return_value=MagicMock(json=lambda: {"ok": False, "description": "blocked"}))
+        with patch.object(payments.requests, "post", broken), patch("builtins.print") as mock_print:
+            result = self._deliver(_paid(payload="images-v1:huge"))
+        # A permanent condition: answering 500 would have Telegram redeliver it forever
+        self.assertEqual(result["statusCode"], 200)
+        self.assertTrue(any("PAYMENT NOT CREDITED and the notice failed" in str(c) for c in mock_print.call_args_list))
+
     def test_payment_is_credited_even_for_a_chat_outside_the_old_allowlist(self):
         with patch.dict(os.environ, {"ALLOWED_CHAT_IDS": "222"}):
             self._deliver(_paid())
@@ -206,6 +214,13 @@ class TestCommands(PaymentTestCase):
         text = self.telegram.texts()[0]
         self.assertIn("Free images left this month: 6 of 10", text)
         self.assertIn("Bought images: 100.", text)
+
+    def test_usecredits_records_consent_for_today(self):
+        self._run("/usecredits")
+        self.assertTrue(self.quota.uses_credits_when_capped(FREE_CHAT, lambda_function._quota().now().strftime("%Y-%m-%d")))
+        self.assertIn("your bought images will be used instead", self.telegram.texts()[0])
+        self._run("/usecredits", chat=UNLIMITED_CHAT)
+        self.assertIn("nothing to change", self.telegram.texts()[1])
 
     def test_terms_and_paysupport(self):
         self._run("/terms")

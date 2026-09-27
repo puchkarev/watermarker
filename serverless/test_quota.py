@@ -91,9 +91,15 @@ class FakeDynamo:
                     row = self.items.setdefault(self._key(update["Key"]), {"images": 0})
                     row["images"] += int(update["ExpressionAttributeValues"][":n"]["N"])
 
+    def put_item(self, TableName, Item):
+        with self.lock:
+            self.items[self._key(Item)] = {k: _plain(v) for k, v in Item.items() if k not in ("pk", "sk")}
+
     def get_item(self, TableName, Key):
         item = self.items.get(self._key(Key))
-        return {"Item": {"images": {"N": str(item["images"])}}} if item else {}
+        if item is None:
+            return {}
+        return {"Item": {k: {"N": str(v)} if isinstance(v, int) else {"S": v} for k, v in item.items()}}
 
     def total(self, key):
         return self.items.get(key, {}).get("images", 0)
@@ -169,9 +175,9 @@ class TestImageQuota(unittest.TestCase):
         quota = _quota(self.db, system=12)
         quota.reserve(UNLIMITED_CHAT, 12)
         self.assertEqual(quota.reserve(FREE_CHAT, 1),
-                         "The bot has reached its daily limit of 12 free images across all users. "
-                         "Please try again after 00:00 UTC (in 1h 30m). Bought images aren't affected by "
-                         "this limit - see /buy.")
+                         "The bot's free images for today are used up (its daily limit is 12 across all users), "
+                         "so your 10 free images this month can't be used until 00:00 UTC (in 1h 30m). Bought "
+                         "images aren't affected by this limit - see /buy.")
         # A free chat blocked by the system limit doesn't lose personal allowance
         self.assertEqual(self.db.total((f"chat#{FREE_CHAT}", "usage#2026-09")), 0)
 
@@ -278,7 +284,8 @@ class TestImageQuota(unittest.TestCase):
         message = "This bot isn't processing free images at the moment (its daily limit is 0)."
         self.assertEqual(quota.reserve(UNLIMITED_CHAT, 1), message)
         # A chat that could buy is told that bought images aren't limited by it
-        self.assertEqual(quota.check(FREE_CHAT), message + " Bought images aren't affected by this limit - see /buy.")
+        self.assertEqual(quota.check(FREE_CHAT), "This bot isn't processing free images at the moment (its daily "
+                                                 "limit is 0). Bought images aren't affected by this limit - see /buy.")
 
     def test_rows_expire_after_the_period_following_their_own(self):
         self.quota.reserve(FREE_CHAT, 1)
@@ -403,18 +410,53 @@ class TestBoughtCredits(unittest.TestCase):
                                   "split the zip. Your free allowance resets at 00:00 UTC on 1 October (in 4d 1h).")
         self.assertEqual((self.db.total(USAGE), self.db.total(BALANCE), self.db.total(SYSTEM)), (5, 3, 5))
 
-    def test_bought_images_are_not_limited_by_the_system_cap(self):
+    def test_capped_free_images_are_not_silently_replaced_by_bought_ones(self):
         quota = _quota(self.db, system=10)
         quota.reserve(UNLIMITED_CHAT, 10)
-        self._buy(20, quota=quota)
-        # Free images would be refused today, so the whole job runs on bought ones
+        self._buy(100, quota=quota)
+        # 10 free images left this month, but the bot's free images for today are gone:
+        # spending bought ones instead needs the user's say-so
+        message = quota.reserve(FREE_CHAT, 4)
+        self.assertEqual(message, "The bot's free images for today are used up (its daily limit is 10 across all "
+                                  "users), so your 10 free images this month can't be used until 00:00 UTC (in "
+                                  "1h 30m). You have 100 bought images: send /usecredits to use them for this zip "
+                                  "and any others today, then send it again.")
+        self.assertEqual((self.db.total(USAGE), self.db.total(BALANCE), self.db.total(SYSTEM)), (0, 100, 10))
+
+        self.assertEqual(quota.use_credits_when_capped(FREE_CHAT), "00:00 UTC (in 1h 30m)")
+        self.assertIsNone(quota.reserve(FREE_CHAT, 4))
+        # Bought images, outside the system cap; the free allowance is kept for later
+        self.assertEqual((self.db.total(USAGE), self.db.total(BALANCE), self.db.total(SYSTEM)), (0, 96, 10))
+        quota.release(FREE_CHAT, 4)
+        self.assertEqual(self.db.total(BALANCE), 100)
+
+    def test_consent_lasts_for_the_day(self):
+        clock = Clock(datetime(2026, 9, 26, 22, 30, tzinfo=timezone.utc))
+        quota = _quota(self.db, clock, system=10)
+        quota.use_credits_when_capped(FREE_CHAT)
+        row = self.db.items[(f"chat#{FREE_CHAT}", "credits-when-capped#2026-09-26")]
+        self.assertEqual(row["expires_at"], int(datetime(2026, 9, 27, tzinfo=timezone.utc).timestamp()))
+        self.assertTrue(quota.uses_credits_when_capped(FREE_CHAT, "2026-09-26"))
+        self.assertFalse(quota.uses_credits_when_capped(FREE_CHAT, "2026-09-27"))
+
+    def test_capped_and_too_few_bought_images_names_both(self):
+        quota = _quota(self.db, system=10)
+        quota.reserve(UNLIMITED_CHAT, 10)
+        self._buy(1, quota=quota)
+        quota.use_credits_when_capped(FREE_CHAT)
+        message = quota.reserve(FREE_CHAT, 4)
+        self.assertIn("free images for today are used up", message)
+        self.assertIn("Your 1 bought images aren't enough for this zip of 4 images (3 short)", message)
+        self.assertNotIn("/usecredits", message)
+        self.assertEqual(self.db.total(BALANCE), 1)
+
+    def test_a_chat_without_free_images_left_spends_bought_ones_despite_the_cap(self):
+        # Past its free allowance a chat is buying anyway: no consent needed, cap not involved
+        quota = _quota(self.db, system=10)
+        quota.reserve(FREE_CHAT, 10)
+        self._buy(20, quota=quota)  # the cap is now full with FREE_CHAT's own 10
         self.assertIsNone(quota.reserve(FREE_CHAT, 5))
-        self.assertEqual((self.db.total(USAGE), self.db.total(BALANCE), self.db.total(SYSTEM)), (0, 15, 10))
-        quota.release(FREE_CHAT, 5)
-        self.assertEqual((self.db.total(USAGE), self.db.total(BALANCE), self.db.total(SYSTEM)), (0, 20, 10))
-        # Without enough bought images the system limit is what's reported, with the way out
-        self.assertIn("Bought images aren't affected by this limit - see /buy.", quota.reserve(FREE_CHAT, 25))
-        self.assertEqual(self.db.total(BALANCE), 20)
+        self.assertEqual((self.db.total(USAGE), self.db.total(BALANCE)), (10, 15))
 
     def test_unlimited_chats_never_use_a_balance(self):
         self.quota.credit(UNLIMITED_CHAT, 1, "ch9", "small", 100, 200)
@@ -438,6 +480,54 @@ class TestBoughtCredits(unittest.TestCase):
                              ("-100123", "777", "large", 1000, 1000))
             self.assertNotIn("expires_at", row)
         self.assertNotIn("expires_at", self.db.items[("chat#-100123", "balance")])
+
+    def test_storage_error_mid_reservation_hands_back_what_was_taken(self):
+        self._buy(50)
+        self.quota.reserve(FREE_CHAT, 5)
+
+        original = self.db.update_item
+
+        def failing(**kwargs):
+            if kwargs.get("ConditionExpression"):
+                raise _ClientError("ProvisionedThroughputExceededException")
+            return original(**kwargs)
+        self.db.update_item = failing
+        with self.assertRaises(_ClientError):
+            self.quota.reserve(FREE_CHAT, 8)  # 5 free taken, then the balance write fails
+        # The month's free allowance and the day's count are back where they were
+        self.assertEqual((self.db.total(USAGE), self.db.total(SYSTEM), self.db.total(BALANCE)), (5, 5, 50))
+
+    def test_storage_error_on_the_system_counter_hands_back_the_free_images(self):
+        original = self.db.update_item
+
+        def failing(**kwargs):
+            if kwargs["Key"]["pk"]["S"] == "system" and int(kwargs["ExpressionAttributeValues"][":n"]["N"]) > 0:
+                raise _ClientError("InternalServerError")
+            return original(**kwargs)
+        self.db.update_item = failing
+        with self.assertRaises(_ClientError):
+            self.quota.reserve(FREE_CHAT, 3)
+        self.assertEqual(self.db.total(USAGE), 0)
+
+    def test_balance_that_grew_after_a_failed_take_is_retried(self):
+        # A parallel job of the same chat returned images between the failed take and the re-check
+        self._buy(30)
+        self.quota.reserve(FREE_CHAT, 10)
+        original, calls = self.db.update_item, []
+
+        def first_take_fails(**kwargs):
+            if kwargs.get("ConditionExpression") and not calls:
+                calls.append(1)
+                raise _ClientError("ConditionalCheckFailedException")
+            return original(**kwargs)
+        self.db.update_item = first_take_fails
+        self.assertIsNone(self.quota.reserve(FREE_CHAT, 20))
+        self.assertEqual(self.db.total(BALANCE), 10)
+
+    def test_shortfall_is_never_negative(self):
+        # Only possible when the balance was re-read higher than the failed take saw it
+        message = self.quota._user_message(0, 99, 20)
+        self.assertEqual(message, "Your balance changed while this zip was being checked. Please send it again.")
 
     def test_other_transaction_failures_are_raised_not_treated_as_duplicates(self):
         def conflict(**kwargs):
