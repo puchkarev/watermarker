@@ -247,14 +247,18 @@ chats: every member of an admin group chat would be an admin.
 | `/grant <chat id> <images> [reason]` | Add images to a chat's balance. No money moves; prefer this for goodwill or to fix a billing mistake |
 | `/refund <charge id>` | Show what refunding a purchase would do; `/refund <charge id> confirm` does it |
 | `/admins` | Who is an admin, marking the root admins from `--admin-chat-ids` |
-| `/promote <chat id>` | Make a private chat an admin (groups are refused) |
+| `/promote <chat id>` | Show who that chat is and what admin would let it do; `/promote <chat id> confirm` does it. Groups are refused |
 | `/demote <chat id>` | Show what demoting would do; `/demote <chat id> confirm` does it |
 | `/unlimited` | Chats with no personal limit, marking the root ones from `--unlimited-chat-ids` |
-| `/giveunlimited <chat id>` | Stop counting a chat's images against its allowance and balance |
+| `/giveunlimited <chat id>` | Show who that chat is; `/giveunlimited <chat id> confirm` stops counting its images against its allowance and balance |
 | `/takeunlimited <chat id>` | Show what that would do; `/takeunlimited <chat id> confirm` counts them again |
 
+- Every change needs `confirm`, granting included: the preview names the chat, or
+  says the bot hasn't seen that id, which is what catches a mistyped id.
 - The chats in `--admin-chat-ids` and `--unlimited-chat-ids` are root entries: no
-  command can demote or limit them, not even their own. Admins and unlimited chats
+  command can demote or limit them, not even their own. If one of them was also
+  added from chat, `/demote` or `/takeunlimited` removes that, so taking it out of
+  the deployment config later really does take the privilege away. Admins and unlimited chats
   added from chat are kept in the table alongside them. If a promoted admin
   misbehaves, or everyone gets demoted by mistake, a root admin (or a redeploy) can
   always put it right. Changes apply from the chat's next message.

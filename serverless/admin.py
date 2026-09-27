@@ -19,6 +19,8 @@ an "ADMIN AUDIT" line with what changed and the before and after: /grant and /re
 the only commands in the system that move credits or money, and /promote, /demote,
 /giveunlimited and /takeunlimited, the only ones that change who holds a privilege.
 """
+import os
+
 import payments
 
 PAGE_SIZE = 20
@@ -37,10 +39,10 @@ HELP_TEXT = (
     "/refund <charge id> - Show what refunding that purchase would do.\n"
     "/refund <charge id> confirm - Refund the Stars and take the pack's images back.\n"
     "/admins - Who can use these commands.\n"
-    "/promote <chat id> - Make a private chat an admin.\n"
+    "/promote <chat id> [confirm] - Make a private chat an admin.\n"
     "/demote <chat id> [confirm] - Take admin away. Root admins (from the deployment) can't be demoted.\n"
     "/unlimited - Chats with no personal limit.\n"
-    "/giveunlimited <chat id> - Stop counting a chat's images against its allowance or balance.\n"
+    "/giveunlimited <chat id> [confirm] - Stop counting a chat's images against its allowance or balance.\n"
     "/takeunlimited <chat id> [confirm] - Count them again. Root entries can't be changed here."
 )
 
@@ -385,13 +387,36 @@ def _refund(bot_token, chat_id, args, quota):
     return reply
 
 
-# --- who holds a privilege: audited, and the removals confirmed ---
+# --- who holds a privilege: every change previewed, confirmed and audited ---
+#
+# Granting needs confirm as much as revoking does: a mistyped id on /promote hands a
+# stranger every command here, and the preview's name is what catches the typo.
 
+NOUN = {"admin": "an admin", "unlimited": "unlimited"}
+GIVE = {"admin": "/promote", "unlimited": "/giveunlimited"}
+TAKE = {"admin": "/demote", "unlimited": "/takeunlimited"}
+ROOT_SETTING = {"admin": "ADMIN_CHAT_IDS", "unlimited": "UNLIMITED_CHAT_IDS"}
 ROOT_NOTE = "root, from the deployment config"
+GRANTS = {
+    "admin": "an admin: it can read every chat's usage and purchases, /grant images, /refund charges, "
+             "and /promote or /demote other admins",
+    "unlimited": "unlimited: nothing it sends counts against its monthly allowance or its bought images "
+                 "(the bot's daily limit still applies)",
+}
 
 
-def _profile(quota, chat):
-    return quota.chat_records(chat).get("profile", {})
+def _named(chat, profile):
+    """A chat's label for a preview, flagging an id the bot has never seen (a likely typo)."""
+    return _label(chat, profile) if profile else f"{chat} (not seen by the bot recently - check the id)"
+
+
+def _allowlist_note(target):
+    """The deprecated ALLOWED_CHAT_IDS refuses a chat before any of this applies."""
+    allowed = {part.strip() for part in os.environ.get("ALLOWED_CHAT_IDS", "").split(",") if part.strip()}
+    if allowed and str(target) not in allowed:
+        return ("\nNote: ALLOWED_CHAT_IDS is set and doesn't include it, so its messages are still refused - "
+                "add it there or clear the allowlist.")
+    return ""
 
 
 def _members(quota, kind, title):
@@ -400,9 +425,10 @@ def _members(quota, kind, title):
         return f"{title}: none."
     lines = [f"{title} ({len(members)}):"]
     for chat in sorted(members):
-        row = members[chat]
-        how = ROOT_NOTE if row is None else f"added by {row.get('added_by')} on {(row.get('ts') or '')[:10]}"
-        lines.append(f"- {_label(chat, _profile(quota, chat))}: {how}")
+        row = members[chat]["row"]
+        added = f"added by {row.get('added_by')} on {(row.get('ts') or '')[:10]}" if row else ""
+        how = (ROOT_NOTE + (f", and {added} from chat" if row else "")) if members[chat]["root"] else added
+        lines.append(f"- {_label(chat, quota.profile(chat))}: {how}")
     return "\n".join(lines)
 
 
@@ -414,33 +440,65 @@ def _unlimited(bot_token, chat_id, args, quota):
     return _members(quota, "unlimited", "Unlimited chats")
 
 
-@_usage_reply
-def _promote(bot_token, chat_id, args, quota):
-    target = _chat_arg(args, "/promote <chat id>")
-    if target < 0:
+def _give(kind, chat_id, args, quota):
+    target = _chat_arg(args, f"{GIVE[kind]} <chat id> [confirm]")
+    if kind == "admin" and target < 0:
         return (f"Chat {target} is a group: every member of it would be an admin. "
                 "Admins must be private chats - promote the person's own chat instead.")
-    if quota.is_admin(target) or not quota.add_member("admin", target, chat_id):
-        return f"Chat {target} is already an admin. Nothing changed."
-    _audit(chat_id, "promote", chat=target, admin_before=False, admin_after=True)
-    return (f"Chat {_label(target, _profile(quota, target))} is now an admin: it can use every admin "
-            f"command, from its next message. Undo with /demote {target}.")
+    if str(target) in quota.members(kind):
+        return f"Chat {target} is already {NOUN[kind]}. Nothing changed."
+    if args[1:] != ["confirm"]:
+        return (f"This makes {_named(target, quota.profile(target))} {GRANTS[kind]}.{_allowlist_note(target)}\n"
+                f"To go ahead: {GIVE[kind]} {target} confirm")
+    if not quota.add_member(kind, target, chat_id):
+        return f"Chat {target} is already {NOUN[kind]}. Nothing changed."
+    _audit(chat_id, GIVE[kind].lstrip("/"), chat=target, **{f"{kind}_before": False, f"{kind}_after": True})
+    return (f"Chat {_label(target, quota.profile(target))} is now {NOUN[kind]}, from its next message. "
+            f"Undo with {TAKE[kind]} {target}.{_allowlist_note(target)}")
+
+
+def _take_root(kind, chat_id, target, quota):
+    """A root entry keeps its privilege whatever happens here, but a config row under it
+    is deleted: left in place, it would bring the privilege back once the chat leaves
+    the deployment config."""
+    removed = quota.remove_member(kind, target)
+    if removed:
+        _audit(chat_id, TAKE[kind].lstrip("/"), chat=target, root=True, row_removed=True,
+               **{f"{kind}_before": True, f"{kind}_after": True})
+    what = "a root admin" if kind == "admin" else "unlimited"
+    verb = "demoted" if kind == "admin" else "changed"
+    reply = f"{target} is {what} from the deployment config and can't be {verb} here."
+    if removed:
+        reply += (f" It had also been made {NOUN[kind]} from chat; that was removed, so it stops being "
+                  f"{NOUN[kind]} once it's taken out of {ROOT_SETTING[kind]}.")
+    return reply
+
+
+@_usage_reply
+def _promote(bot_token, chat_id, args, quota):
+    return _give("admin", chat_id, args, quota)
+
+
+@_usage_reply
+def _give_unlimited(bot_token, chat_id, args, quota):
+    return _give("unlimited", chat_id, args, quota)
 
 
 @_usage_reply
 def _demote(bot_token, chat_id, args, quota):
     target = _chat_arg(args, "/demote <chat id> [confirm]")
-    if str(target) in quota.root["admin"]:
-        return f"{target} is a root admin from the deployment config and can't be demoted here."
     members = quota.members("admin")
-    if str(target) not in members:
+    entry = members.get(str(target))
+    if entry is None:
         return f"Chat {target} isn't an admin. Nothing changed."
+    if entry["root"]:
+        return _take_root("admin", chat_id, target, quota)
     if args[1:] != ["confirm"]:
-        lines = [f"Demoting {_label(target, _profile(quota, target))} takes away every admin command, "
+        lines = [f"Demoting {_label(target, quota.profile(target))} takes away every admin command, "
                  "from its next message."]
         if str(target) == str(chat_id):
             lines.append("That's this chat: you will lose admin access yourself.")
-        if not [c for c, row in members.items() if row is not None and c != str(target)]:
+        if not [c for c, m in members.items() if not m["root"] and c != str(target)]:
             lines.append("It's the last admin added from chat: only the root admins from the deployment "
                          "config will be left.")
         lines.append(f"To go ahead: /demote {target} confirm")
@@ -451,40 +509,29 @@ def _demote(bot_token, chat_id, args, quota):
     return f"Chat {target} is no longer an admin."
 
 
-def _allowance(quota, chat):
-    """(free images left this month, bought images left) for one chat."""
-    records = quota.chat_records(chat)
+def _allowance(quota, records):
+    """(free images left this month, bought images left) from a chat's records."""
     used = records.get(f"usage#{_month(quota)}", {}).get("images", 0)
     return max(0, quota.free_monthly - used), records.get("balance", {}).get("images", 0)
 
 
 @_usage_reply
-def _give_unlimited(bot_token, chat_id, args, quota):
-    target = _chat_arg(args, "/giveunlimited <chat id>")
-    if quota.is_unlimited(target) or not quota.add_member("unlimited", target, chat_id):
-        return f"Chat {target} is already unlimited. Nothing changed."
-    _audit(chat_id, "give-unlimited", chat=target, unlimited_before=False, unlimited_after=True)
-    _, balance = _allowance(quota, target)
-    return (f"Chat {_label(target, _profile(quota, target))} is now unlimited: from its next image, nothing "
-            f"counts against its monthly allowance or its bought images ({balance}, which it keeps). The "
-            f"bot's daily limit still applies. Undo with /takeunlimited {target}.")
-
-
-@_usage_reply
 def _take_unlimited(bot_token, chat_id, args, quota):
     target = _chat_arg(args, "/takeunlimited <chat id> [confirm]")
-    if str(target) in quota.root["unlimited"]:
-        return f"{target} is unlimited from the deployment config and can't be changed here."
-    if not quota.is_unlimited(target):
+    entry = quota.members("unlimited").get(str(target))
+    if entry is None:
         return f"Chat {target} isn't unlimited. Nothing changed."
-    free_left, balance = _allowance(quota, target)
+    if entry["root"]:
+        return _take_root("unlimited", chat_id, target, quota)
+    records = quota.chat_records(target)
+    free_left, balance = _allowance(quota, records)
     if args[1:] != ["confirm"]:
-        return (f"Taking unlimited from {_label(target, _profile(quota, target))}: from its next image it uses "
+        return (f"Taking unlimited from {_label(target, records.get('profile', {}))}: from its next image it uses "
                 f"its free images ({free_left} of {quota.free_monthly} left this month), then its bought "
                 f"images ({balance}).\nTo go ahead: /takeunlimited {target} confirm")
     if not quota.remove_member("unlimited", target):
         return f"Chat {target} isn't unlimited. Nothing changed."
-    _audit(chat_id, "take-unlimited", chat=target, unlimited_before=True, unlimited_after=False,
+    _audit(chat_id, "takeunlimited", chat=target, unlimited_before=True, unlimited_after=False,
            free_left=free_left, balance=balance)
     return (f"Chat {target} is no longer unlimited. It has {free_left} free images left this month and "
             f"{balance} bought images.")

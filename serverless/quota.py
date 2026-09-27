@@ -195,7 +195,8 @@ class ImageQuota:
         """{(kind, chat id): attributes} for every config row, read once per instance."""
         if self._config_rows is None:
             rows = {}
-            for sk, attrs in self._partition("config").items():
+            # Strongly consistent: a /demote must hold from the very next message
+            for sk, attrs in self._partition("config", consistent=True).items():
                 kind, _, chat = sk.partition("#")
                 if kind in self.CONFIG_KINDS and chat:
                     rows[(kind, chat)] = attrs
@@ -203,10 +204,11 @@ class ImageQuota:
         return self._config_rows
 
     def members(self, kind):
-        """{chat id: None for a root entry, else its row (added_by, ts)}."""
-        found = {chat: attrs for (k, chat), attrs in self._config().items() if k == kind}
-        found.update({chat: None for chat in self.root[kind]})
-        return found
+        """{chat id: {"root": bool, "row": its config row or None}}. A root entry can
+        have a row too (added from chat before it was put in the deployment config)."""
+        rows = {chat: attrs for (k, chat), attrs in self._config().items() if k == kind}
+        return {chat: {"root": chat in self.root[kind], "row": rows.get(chat)}
+                for chat in set(rows) | self.root[kind]}
 
     @property
     def unlimited(self):
@@ -246,10 +248,10 @@ class ImageQuota:
         return True
 
     def remove_member(self, kind, chat_id):
-        """Delete a config row. False if there was none; root entries are never touched."""
+        """Delete a config row. False if there was none. Always deletes, root entry or not:
+        a row can't grant what the deployment config does, and one left under a root entry
+        would quietly bring the privilege back once the entry leaves the config."""
         chat = str(chat_id)
-        if chat in self.root[kind]:
-            return False
         try:
             self.db.delete_item(TableName=self.table, Key=self._item_key(("config", f"{kind}#{chat}")),
                                 ConditionExpression="attribute_exists(pk)")
@@ -593,11 +595,16 @@ class ImageQuota:
         """Every row of one chat, {sk: attributes}: a single Query thanks to the sort key."""
         return self._partition(f"chat#{chat_id}")
 
-    def _partition(self, pk):
+    def profile(self, chat_id):
+        """A chat's profile row (record_interaction), or {}."""
+        item = self.db.get_item(TableName=self.table, Key=self._item_key((f"chat#{chat_id}", "profile"))).get("Item")
+        return _attributes(item) if item else {}
+
+    def _partition(self, pk, consistent=False):
         records, start = {}, None
         while True:
             kwargs = {"TableName": self.table, "KeyConditionExpression": "pk = :pk",
-                      "ExpressionAttributeValues": {":pk": {"S": pk}}}
+                      "ExpressionAttributeValues": {":pk": {"S": pk}}, "ConsistentRead": consistent}
             if start:
                 kwargs["ExclusiveStartKey"] = start
             page = self.db.query(**kwargs)
