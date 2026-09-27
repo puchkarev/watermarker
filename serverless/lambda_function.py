@@ -24,9 +24,11 @@ Environment variables:
     FREE_MONTHLY_IMAGES   images per UTC month for chats not in UNLIMITED_CHAT_IDS (default 10)
     FREE_DAILY_IMAGES     deprecated name, read only when FREE_MONTHLY_IMAGES is unset (now per month)
     SYSTEM_DAILY_IMAGES   images per UTC day for the whole deployment (default 5000)
-    UNLIMITED_CHAT_IDS    comma-separated chat ids with no personal limit (the system limit still applies)
+    UNLIMITED_CHAT_IDS    comma-separated chat ids with no personal limit (the system limit still applies);
+                          root entries: admins can add more from chat but never remove these
     ADMIN_CHAT_IDS        comma-separated chat ids that may use the admin commands (admin.py);
-                          a separate privilege from UNLIMITED_CHAT_IDS, empty means no admins
+                          a separate privilege from UNLIMITED_CHAT_IDS. Root admins: they can
+                          promote more from chat, and can't be demoted. Empty means no admins
     ALLOWED_CHAT_IDS  deprecated: comma-separated chat ids; when set, every other chat is refused
                       and the listed chats are treated as unlimited, as they were before quotas
 """
@@ -95,7 +97,8 @@ def _quota():
                       free_monthly=free or 10,
                       system_daily=os.environ.get("SYSTEM_DAILY_IMAGES") or 5000,
                       # A deprecated allowlist meant "these chats are mine": keep them unthrottled
-                      unlimited_chat_ids=_id_set("UNLIMITED_CHAT_IDS") | _allowed_chat_ids())
+                      unlimited_chat_ids=_id_set("UNLIMITED_CHAT_IDS") | _allowed_chat_ids(),
+                      admin_chat_ids=_id_set("ADMIN_CHAT_IDS"))
 
 
 def _is_image_job(update):
