@@ -66,7 +66,8 @@ TERMS_TEXT = (
 PAYSUPPORT_TEXT = (
     "Payments, credits and billing\n"
     f"Email: {SUPPORT_EMAIL}\n"
-    "Include which pack you bought and roughly when. Please don't post payment details in a "
+    "Include your chat id (send /balance to see it), which pack you bought, and roughly when. "
+    "Please don't post payment details in a "
     "public GitHub issue.\n"
     "All purchases are final, so this isn't a refund line - but billing mistakes, such as being "
     "charged for images that were never delivered, will be put right.\n"
@@ -208,12 +209,14 @@ def handle_successful_payment(bot_token, message, quota):
 
 def _balance_text(quota, chat_id):
     status = quota.status(chat_id)
+    # The chat id is what support needs to find a purchase; it's the user's own, so safe to show
+    chat_line = f"\nYour chat id: {chat_id} (include it if you email /paysupport)."
     if status["unlimited"]:
-        return "This chat has no personal limit."
+        return "This chat has no personal limit." + chat_line
     return (f"Free images left this month: {status['free_left']} of {status['free_monthly']} "
             f"(resets at {status['resets']}).\n"
             f"Bought images: {status['balance']}.\n"
-            "Free images are used first. Buy more with /buy.")
+            "Free images are used first. Buy more with /buy." + chat_line)
 
 
 def handle_command(bot_token, chat_id, text, quota):

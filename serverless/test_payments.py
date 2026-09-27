@@ -223,6 +223,9 @@ class TestCommands(PaymentTestCase):
         text = self.telegram.texts()[0]
         self.assertIn("Free images left this month: 6 of 10", text)
         self.assertIn("Bought images: 100.", text)
+        self.assertIn(f"Your chat id: {FREE_CHAT}", text)
+        self._run("/balance", chat=UNLIMITED_CHAT)
+        self.assertIn(f"Your chat id: {UNLIMITED_CHAT}", self.telegram.texts()[1])
 
     def test_usecredits_records_consent_for_today(self):
         self._run("/usecredits")
@@ -239,6 +242,7 @@ class TestCommands(PaymentTestCase):
         self.assertIn("All purchases are final", terms)
         self.assertIn(payments.TERMS_URL, terms)
         self.assertIn(payments.SUPPORT_EMAIL, support)
+        self.assertIn("Include your chat id (send /balance to see it)", support)
 
     def test_other_text_is_left_to_the_bot(self):
         self.assertFalse(self._run("/size 0.5"))
