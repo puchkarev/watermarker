@@ -33,6 +33,7 @@ jobs:
         python test_watermarker.py
         python serverless/test_lambda_function.py
         python serverless/test_quota.py
+        python serverless/test_payments.py
 
     - name: Check for changes and Create Release
       env:

@@ -249,6 +249,7 @@ def process_text(bot_token, chat_id, text):
         "/y_offset <multiple> - Vertical spacing as a multiple of the watermark height (1.0 = no gap). Default: 3.0.\n"
         f"/quality <1-100> - Output image quality. Higher is sharper but larger. Default: {DEFAULT_QUALITY}.\n"
         "/help - Show this message."
+        + EXTRA_HELP
     )
     
     if text.startswith("/help"):
@@ -389,6 +390,12 @@ def process_text(bot_token, chat_id, text):
         _set_number(bot_token, chat_id, text, "quality", 1, 100, "Usage: /quality <1-100> (e.g., 90)", cast=int)
 
 NO_WATERMARK_MESSAGE = "No watermark set and default 'sun.webp' not found. Use /source <url> to set one."
+
+# Optional extra commands. The serverless deployment installs its payment commands
+# (see serverless/payments.py): a function (bot_token, chat_id, text) -> True if it
+# handled the text, and a paragraph for /help.
+EXTRA_COMMANDS = None
+EXTRA_HELP = ""
 
 # Optional image quota. The serverless deployment installs one (see
 # serverless/quota.py); left as None, as on a server, nothing is counted.
@@ -667,7 +674,8 @@ def handle_update(bot_token, update):
 
         # Handle Text Commands
         if "text" in message:
-            process_text(bot_token, chat_id, message["text"])
+            if not (EXTRA_COMMANDS and EXTRA_COMMANDS(bot_token, chat_id, message["text"])):
+                process_text(bot_token, chat_id, message["text"])
 
         # Handle Photos
         if "photo" in message:

@@ -39,7 +39,7 @@ Telegram ──POST──▶ Lambda Function URL ──▶ receiver: checks the 
 | Lambda function `watermarker-bot` | Runs the bot (Python 3.12, ARM, 2 GB memory, 15 min timeout) |
 | Lambda Function URL | Public HTTPS address Telegram sends messages to. Requests without the secret are refused. |
 | S3 bucket | Per-chat settings and watermark images (a few KB) |
-| DynamoDB table | Image counters for the quotas; old months and days delete themselves |
+| DynamoDB table | Image counters for the quotas (old months and days delete themselves), bought credits and purchase records (kept) |
 | IAM role | Lets the function use that bucket, write logs and call itself |
 | CloudWatch log group | Logs, kept for 14 days |
 
@@ -191,6 +191,37 @@ allowlist: every other chat is refused, the listed chats are treated as unlimite
 (as they were before quotas), and the function logs a deprecation line while it's set. Clear it with `--allowed-chat-ids ""` once you've moved to
 `--unlimited-chat-ids`.
 
+### 7. Selling more images (Telegram Stars)
+
+Once a chat has used its free images it can buy more with `/buy`, paid in
+Telegram Stars. Nothing needs setting up: Stars need no payment provider, and
+the deploy script already asks Telegram for the `pre_checkout_query` updates
+checkout needs.
+
+| Pack | Images | Price |
+|---|---|---|
+| Small | 100 | 200 Stars |
+| Large | 1000 | 1000 Stars |
+
+- The free monthly images are used first, then bought ones. Bought images never
+  expire and aren't limited by the bot's daily cap.
+- A zip needing more than free + bought images is refused whole, with how many it's
+  short. Failed images go back to where they came from, bought ones first.
+- On a day the bot's free images run out, a chat that still has free images left
+  isn't switched to bought ones without asking: it is told so, and `/usecredits`
+  allows it for the rest of that day.
+- `/balance` shows both, `/terms` summarises [TERMS.md](../TERMS.md) (all purchases
+  are final), and `/paysupport` gives the billing contact.
+- Each payment is credited exactly once, even when Telegram delivers it twice, and
+  the payer's user id is kept with it. Payments are handled by the receiver
+  directly: if storing one fails, Telegram is asked to deliver it again.
+- `grep PAYMENT` in the logs finds anything that went wrong with a payment.
+
+If you deployed before payments existed, run `./serverless/deploy.sh deploy`
+(or `attach`) once: an older webhook doesn't receive `pre_checkout_query`, and
+Telegram would cancel every checkout. `/buy` checks for that and says purchases
+are unavailable rather than taking anyone to a checkout that can't finish.
+
 ## Day-to-day commands
 
 | Command | What it does |
@@ -244,4 +275,6 @@ and Lambda keeps them in S3.
 | `template.yaml` | CloudFormation template for every AWS resource |
 | `deploy.sh` | Build, deploy and management script |
 | `requirements.txt` | Python packages bundled into the Lambda |
-| `test_lambda_function.py` | Tests, run with `python serverless/test_lambda_function.py` |
+| `quota.py` | Free allowance, system cap, bought credits and purchase records in DynamoDB |
+| `payments.py` | Telegram Stars: invoices, pre-checkout, crediting, `/buy`, `/balance`, `/terms`, `/paysupport` |
+| `test_lambda_function.py`, `test_quota.py`, `test_payments.py` | Tests, run each with `python serverless/<file>` |

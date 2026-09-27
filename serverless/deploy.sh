@@ -126,7 +126,7 @@ build_package() {
         -r "$SCRIPT_DIR/requirements.txt"
 
     cp "$REPO_DIR/watermarker.py" "$REPO_DIR/watermarker_core.py" "$REPO_DIR/sun.webp" \
-       "$SCRIPT_DIR/lambda_function.py" "$SCRIPT_DIR/quota.py" "$BUILD_DIR/pkg/"
+       "$SCRIPT_DIR/lambda_function.py" "$SCRIPT_DIR/quota.py" "$SCRIPT_DIR/payments.py" "$BUILD_DIR/pkg/"
     cp "$tele" "$BUILD_DIR/pkg/submodules/telegram/"
 
     (cd "$BUILD_DIR/pkg" && zip -qr9 "$PACKAGE" . -x '*__pycache__*')
@@ -211,22 +211,31 @@ cmd_attach() {
     curl -sS -X POST "https://api.telegram.org/bot$token/setWebhook" \
         --data-urlencode "url=$url" \
         --data-urlencode "secret_token=$secret" \
-        --data-urlencode 'allowed_updates=["message"]' \
+        --data-urlencode 'allowed_updates=["message","pre_checkout_query"]' \
         --data-urlencode "max_connections=10" | telegram_check \
         || fail "Telegram rejected the webhook"
 
-    commands=$(python3 - "$REPO_DIR/watermarker.py" <<'EOF'
+    # The bot's own commands, then the payment commands only this deployment has
+    commands=$(python3 - "$REPO_DIR/watermarker.py:BOT_COMMANDS" "$SCRIPT_DIR/payments.py:PAYMENT_COMMANDS" <<'EOF'
 import ast, json, sys
-tree = ast.parse(open(sys.argv[1]).read())
-for node in tree.body:
-    if isinstance(node, ast.Assign) and any(getattr(t, "id", None) == "BOT_COMMANDS" for t in node.targets):
-        commands = ast.literal_eval(node.value)
+commands = {}
+for arg in sys.argv[1:]:
+    path, name = arg.rsplit(":", 1)
+    for node in ast.parse(open(path).read()).body:
+        if isinstance(node, ast.Assign) and any(getattr(t, "id", None) == name for t in node.targets):
+            found = ast.literal_eval(node.value)
+            break
+    else:
+        # An empty list would clear the bot's menu, so a renamed constant must stop here
+        sys.exit(f"{name} not found in {path}")
+    commands.update(found)
 print(json.dumps({"commands": [{"command": k, "description": v} for k, v in commands.items()]}))
 EOF
-)
+)   || fail "could not read the bot's command list (the menu was left unchanged)"
     info "Setting the bot's command menu"
     curl -sS -X POST "https://api.telegram.org/bot$token/setMyCommands" \
-        -H 'Content-Type: application/json' -d "$commands" | telegram_check || true
+        -H 'Content-Type: application/json' -d "$commands" | telegram_check \
+        || echo "   Warning: Telegram rejected the command menu; the bot works, but its menu may be out of date." >&2
 
     echo "   Note: while the webhook is set, a polling copy of watermarker.py using the"
     echo "   same bot token gets errors from Telegram. Use '$0 detach' to switch back."
