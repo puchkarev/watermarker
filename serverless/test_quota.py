@@ -36,10 +36,14 @@ class FakeDynamo:
 
     def update_item(self, TableName, Key, UpdateExpression, ExpressionAttributeValues, ReturnValues):
         assert UpdateExpression.startswith("ADD images :n")
+        sets_expiry = "SET expires_at = if_not_exists(expires_at, :exp)" in UpdateExpression
+        assert sets_expiry == (":exp" in ExpressionAttributeValues), UpdateExpression
         key = self._key(Key)
         delta = int(ExpressionAttributeValues[":n"]["N"])
         with self.lock:
-            item = self.items.setdefault(key, {"images": 0, "expires_at": int(ExpressionAttributeValues[":exp"]["N"])})
+            item = self.items.setdefault(key, {"images": 0})
+            if sets_expiry:
+                item.setdefault("expires_at", int(ExpressionAttributeValues[":exp"]["N"]))
             item["images"] += delta
             return {"Attributes": {"images": {"N": str(item["images"])}}}
 
@@ -233,6 +237,15 @@ class TestImageQuota(unittest.TestCase):
         system_expires = self.db.items[("system", "usage#2026-09-26")]["expires_at"]
         self.assertEqual(chat_expires, int(datetime(2026, 11, 1, tzinfo=timezone.utc).timestamp()))
         self.assertEqual(system_expires, int(datetime(2026, 9, 28, tzinfo=timezone.utc).timestamp()))
+
+    def test_rows_other_than_usage_are_written_without_expiry(self):
+        # Balances, charges and totals (#39, #42) must never be deleted by TTL,
+        # including record types whose name happens to be as long as a period
+        for sk in ("balance", "charge#stars_abc123", "total"):
+            self.assertEqual(self.quota._add((f"chat#{FREE_CHAT}", sk), 5), 5)
+            self.assertNotIn("expires_at", self.db.items[(f"chat#{FREE_CHAT}", sk)])
+        self.quota.reserve(FREE_CHAT, 1)
+        self.assertIn("expires_at", self.db.items[(f"chat#{FREE_CHAT}", "usage#2026-09")])
 
     def test_december_rows_expire_in_the_new_year(self):
         quota = _quota(self.db, Clock(datetime(2026, 12, 31, 12, 0, tzinfo=timezone.utc)))

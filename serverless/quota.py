@@ -41,8 +41,12 @@ def _next_month(when):
 
 
 def _expires_at(key):
-    """Keep a usage row until the end of the period after its own, then let TTL delete it."""
-    period = key[1].rsplit("#", 1)[-1]
+    """TTL for a usage row: the end of the period after its own. None for every other
+    record type (balances, charges, totals), which must never expire, so they are
+    written without expires_at at all and DynamoDB's TTL never touches them."""
+    kind, _, period = key[1].partition("#")
+    if kind != "usage":
+        return None
     if len(period) == len("2026-09"):
         start = datetime.strptime(period, "%Y-%m").replace(tzinfo=timezone.utc)
         end = _next_month(_next_month(start))
@@ -85,11 +89,16 @@ class ImageQuota:
 
     def _add(self, key, count):
         """Atomically add count (may be negative) to a (pk, sk) row and return the new total."""
+        expression, values = "ADD images :n", {":n": {"N": str(count)}}
+        expires_at = _expires_at(key)
+        if expires_at is not None:
+            expression += " SET expires_at = if_not_exists(expires_at, :exp)"
+            values[":exp"] = {"N": str(expires_at)}
         result = self.db.update_item(
             TableName=self.table,
             Key=self._item_key(key),
-            UpdateExpression="ADD images :n SET expires_at = if_not_exists(expires_at, :exp)",
-            ExpressionAttributeValues={":n": {"N": str(count)}, ":exp": {"N": str(_expires_at(key))}},
+            UpdateExpression=expression,
+            ExpressionAttributeValues=values,
             ReturnValues="UPDATED_NEW",
         )
         return int(result["Attributes"]["images"]["N"])

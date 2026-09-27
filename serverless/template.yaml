@@ -58,6 +58,10 @@ Resources:
   # Usage rows expire on their own via TTL; rows without expires_at never do.
   # A key schema change replaces the table: Retain keeps the old one (and its data)
   # instead of deleting it, and "deploy.sh remove" leaves it too.
+  # Do not change KeySchema or anything else that forces replacement once credits
+  # live here. Retain only keeps the old table: the function would be pointed at a
+  # new, EMPTY one and every balance would read as zero. New record types are new
+  # sk values, which need no schema change, so there should never be a reason to.
   QuotaTable:
     Type: AWS::DynamoDB::Table
     DeletionPolicy: Retain
