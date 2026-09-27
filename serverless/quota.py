@@ -48,10 +48,12 @@ Items (pk / sk):
     chat#<id> / images#2026-09        every image the chat was given that month,
                                       free or bought: its usage history
     chat#<id> / grant#<timestamp>     images an admin added (admin.py), with who and why
+    chat#<id> / profile               last seen, message count, and the chat's current
+                                      Telegram username / name / group title
 Usage rows carry expires_at (epoch seconds) so DynamoDB TTL deletes them once
 their period and the one after it are over; a consent row, once its day is over.
-Balance, charge, images and grant rows have no expires_at at all, so TTL never
-touches them. Keying by owner then record type keeps everything about one chat in
+Balance, charge, images, grant and profile rows have no expires_at at all, so TTL
+never touches them. Keying by owner then record type keeps everything about one chat in
 one partition, readable with a single Query.
 """
 from datetime import datetime, timedelta, timezone
@@ -467,6 +469,34 @@ class ImageQuota:
         if free_left:
             return self._capped_message(free_left, 0, 1)
         return self._user_message(0, 0, 1)
+
+    # --- who uses the bot ---
+
+    PROFILE_FIELDS = ("username", "first_name", "last_name", "title")
+
+    def record_interaction(self, chat):
+        """Note that a chat used the bot: bump its message count, stamp last_seen and
+        refresh its display fields from Telegram's Chat object (username, names, group
+        title), removing any it no longer has - they change, and a username can be
+        reassigned. Best effort: never raises, so it can't affect the update itself."""
+        sets, removes = ["last_seen = :now"], []
+        names, values = {}, {":now": {"S": self.now().isoformat()}, ":one": {"N": "1"}}
+        for field in self.PROFILE_FIELDS:
+            names[f"#{field}"] = field  # aliased: DynamoDB reserves some plain words
+            if chat.get(field):
+                sets.append(f"#{field} = :{field}")
+                values[f":{field}"] = {"S": str(chat[field])}
+            else:
+                removes.append(f"#{field}")
+        expression = "SET " + ", ".join(sets) + " ADD messages :one"
+        if removes:
+            expression += " REMOVE " + ", ".join(removes)
+        try:
+            self.db.update_item(TableName=self.table, Key=self._item_key((f"chat#{chat['id']}", "profile")),
+                                UpdateExpression=expression, ExpressionAttributeNames=names,
+                                ExpressionAttributeValues=values)
+        except Exception as e:
+            print(f"profile update failed chat={chat.get('id')}: {e}")
 
     # --- reads and changes for the admin commands (admin.py) ---
 

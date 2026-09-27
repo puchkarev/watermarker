@@ -235,7 +235,7 @@ chats: every member of an admin group chat would be an admin.
 
 | Command | What it does |
 |---|---|
-| `/users [page]` | Chats with any usage or balance, most active this month first |
+| `/users [page]` | Every chat that has used the bot, with its @username or name and when it was last seen; most active this month first |
 | `/usage <chat id>` | One chat: this month, free used, bought images left, lifetime total, recent purchases |
 | `/charges <chat id> [page]` | A chat's purchases, with the charge ids `/refund` needs |
 | `/limits` | The configured limits and how much of today's free cap is used |
@@ -254,6 +254,8 @@ chats: every member of an admin group chat would be an admin.
   `./serverless/deploy.sh logs | grep "ADMIN AUDIT"`.
 - For anyone else these commands behave like any unknown command: no reply, and
   nothing in the logs.
+- Every admin command, read-only ones included, writes an `ADMIN COMMAND` line
+  to the logs with the admin, the command and its arguments.
 - Refunds aren't offered to users (all purchases are final, see
   [TERMS.md](../TERMS.md)); `/refund` exists to put right a billing mistake.
 

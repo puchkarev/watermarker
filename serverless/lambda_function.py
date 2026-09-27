@@ -136,6 +136,13 @@ def receive(event, context):
         print("Ignoring update with an unparseable body")
         return _response(200)
 
+    # Every chat that sends anything is recorded (/users), whatever the update turns out to be
+    chat = (update.get("message") or {}).get("chat")
+    if chat and chat.get("id") is not None:
+        quota = _quota()
+        if quota is not None:
+            quota.record_interaction(chat)
+
     # Payments are handled here rather than in the worker. A pre-checkout query must be
     # answered within 10 seconds or Telegram cancels the payment, and a completed payment
     # must be credited before we answer: a 500 makes Telegram deliver it again, which is

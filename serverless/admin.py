@@ -41,6 +41,8 @@ def handle_command(bot_token, chat_id, text, quota, admins):
     handler = COMMANDS.get(command)
     if handler is None:
         return False
+    # Privileged commands, so every one is on record, read-only or not (never for non-admins)
+    print(f"ADMIN COMMAND admin={chat_id} command={command} args={' '.join(words[1:])!r}")
     if quota is None:
         reply = "Image limits aren't enabled on this bot, so there is nothing to administer."
     else:
@@ -111,13 +113,32 @@ def _month(quota):
     return quota.now().strftime("%Y-%m")
 
 
+def _display_name(profile):
+    """How a chat is shown next to its id: @username, else its name, else the group
+    title. Only a display hint - usernames change and get reassigned; the id is the chat."""
+    if profile.get("username"):
+        return "@" + profile["username"]
+    name = " ".join(p for p in (profile.get("first_name"), profile.get("last_name")) if p)
+    return name or profile.get("title") or ""
+
+
+def _label(chat, profile):
+    name = _display_name(profile)
+    return f"{chat} ({name})" if name else str(chat)
+
+
 def _chats(quota):
-    """{chat id: {"month", "free", "balance", "lifetime"}} for every chat with a record."""
+    """{chat id: {"month", "free", "balance", "lifetime", "profile"}} for every chat
+    with a record - including chats that only ever sent commands."""
     month, chats = _month(quota), {}
     for pk, sk, attrs in quota.all_records():
         if not pk.startswith("chat#"):
             continue
-        row = chats.setdefault(pk[len("chat#"):], {"month": 0, "free": 0, "balance": 0, "lifetime": 0})
+        row = chats.setdefault(pk[len("chat#"):],
+                               {"month": 0, "free": 0, "balance": 0, "lifetime": 0, "profile": {}})
+        if sk == "profile":
+            row["profile"] = attrs
+            continue
         images = attrs.get("images", 0)
         if sk == f"images#{month}":
             row["month"] += images
@@ -132,7 +153,10 @@ def _chats(quota):
 
 def _users(bot_token, chat_id, args, quota):
     page = _page_arg(args, 0)
-    chats = sorted(_chats(quota).items(), key=lambda kv: (-kv[1]["month"], -kv[1]["lifetime"], kv[0]))
+    # Most images this month first, then lifetime; chats that never processed an image
+    # (commands only) by when they were last seen
+    chats = sorted(_chats(quota).items(), key=lambda kv: kv[1]["profile"].get("last_seen") or "", reverse=True)
+    chats = sorted(chats, key=lambda kv: (-kv[1]["month"], -kv[1]["lifetime"]))
     if not chats:
         return "No chats have used the bot yet."
     pages = (len(chats) + PAGE_SIZE - 1) // PAGE_SIZE
@@ -140,7 +164,9 @@ def _users(bot_token, chat_id, args, quota):
     lines = [f"Chats {len(chats)} - page {page} of {pages} (this month / free / bought left / lifetime)"]
     for chat, row in chats[(page - 1) * PAGE_SIZE:page * PAGE_SIZE]:
         marker = " (unlimited)" if quota.is_unlimited(chat) else ""
-        lines.append(f"{chat}{marker}: {row['month']} / {row['free']} / {row['balance']} / {row['lifetime']}")
+        seen = row["profile"].get("last_seen")
+        lines.append(f"{_label(chat, row['profile'])}{marker}: {row['month']} / {row['free']} / "
+                     f"{row['balance']} / {row['lifetime']}" + (f", last seen {seen[:16]}" if seen else ""))
     if page < pages:
         lines.append(f"Next: /users {page + 1}")
     return "\n".join(lines)
@@ -171,8 +197,11 @@ def _usage(bot_token, chat_id, args, quota):
     this_month = records.get(f"images#{month}", {}).get("images", 0)
     free = records.get(f"usage#{month}", {}).get("images", 0)
     lifetime = sum(a.get("images", 0) for sk, a in records.items() if sk.startswith("images#"))
-    lines = [f"Chat {target}" + (" (unlimited)" if quota.is_unlimited(target) else ""),
-             f"This month: {this_month} images, {free} of {quota.free_monthly} free",
+    profile = records.get("profile", {})
+    lines = [f"Chat {_label(target, profile)}" + (" (unlimited)" if quota.is_unlimited(target) else "")]
+    if profile:
+        lines.append(f"Last seen {profile.get('last_seen', '')[:16]}, {profile.get('messages', 0)} messages")
+    lines += [f"This month: {this_month} images, {free} of {quota.free_monthly} free",
              f"Bought images left: {records.get('balance', {}).get('images', 0)}",
              f"Lifetime: {lifetime} images"]
     charges = _charges_of(records)
@@ -216,7 +245,7 @@ def _limits(bot_token, chat_id, args, quota):
 
 def _stats(bot_token, chat_id, args, quota):
     month = _month(quota)
-    images_month = active = balances = sold = stars = refunds = 0
+    images_month = active = seen = balances = sold = stars = refunds = 0
     for pk, sk, attrs in quota.all_records():
         images = attrs.get("images", 0)
         if pk.startswith("chat#") and sk == f"images#{month}" and images:
@@ -224,13 +253,15 @@ def _stats(bot_token, chat_id, args, quota):
             active += 1
         elif pk.startswith("chat#") and sk == "balance":
             balances += images
+        elif pk.startswith("chat#") and sk == "profile" and (attrs.get("last_seen") or "").startswith(month):
+            seen += 1
         elif pk.startswith("charge#"):
             if attrs.get("refunded"):
                 refunds += 1
             else:
                 sold += images
                 stars += attrs.get("stars", 0)
-    return (f"This month: {images_month} images for {active} chats\n"
+    return (f"This month: {images_month} images for {active} chats; {seen} chats used the bot\n"
             f"Free images today: {quota.system_used_today()} of {quota.system_daily}\n"
             f"Sold: {sold} images for {stars} Stars ({refunds} refunded purchases not counted)\n"
             f"Bought images not yet used: {balances}")
