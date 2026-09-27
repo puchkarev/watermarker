@@ -90,6 +90,12 @@ class TestReadCommands(AdminTestCase):
             "Next: /users 2"])
         self.assertEqual(second.splitlines()[1:], ["222: 3 / 3 / 0 / 3"])
 
+    def test_users_includes_a_chat_with_only_free_usage(self):
+        # Its history row missing, e.g. because that best-effort write failed
+        self.db.items[("chat#333", "usage#2026-09")] = {"images": 4, "expires_at": 0}
+        with patch.object(self.quota, "now", return_value=self.quota.now().replace(year=2026, month=9)):
+            self.assertIn("333: 0 / 4 / 0 / 0", self._reply("/users"))
+
     def test_charges(self):
         self.quota.credit(BUYER, PAYER, "ch2", "large", 1000, 1000)
         reply = self._reply("/charges 111").splitlines()
@@ -130,6 +136,12 @@ class TestGrant(AdminTestCase):
                      "balance_before=95", "balance_after=145"):
             self.assertIn(part, audit[0])
 
+    def test_grant_is_recorded_with_who_and_why(self):
+        self._reply("/grant 111 50 billing bug")
+        (sk, row), = [(sk, a) for sk, a in self.quota.chat_records(BUYER).items() if sk.startswith("grant#")]
+        self.assertEqual((row["images"], row["admin"], row["reason"]), (50, str(ADMIN), "billing bug"))
+        self.assertNotIn("expires_at", row)
+
     def test_grant_rejects_bad_amounts(self):
         for text in ("/grant 111", "/grant 111 0", "/grant 111 -5", "/grant 111 lots", "/grant 111 1000000"):
             self.assertIn("Usage: /grant", self._reply(text))
@@ -141,13 +153,31 @@ class TestRefund(AdminTestCase):
     def _refund_calls(self):
         return [body for method, body in self.telegram.calls if method == "refundStarPayment"]
 
+    def _audit(self, mock_print):
+        return [str(c) for c in mock_print.call_args_list if "ADMIN AUDIT" in str(c)]
+
     def test_refund_shows_what_would_happen_before_doing_anything(self):
         reply = self._reply("/refund ch1")
-        self.assertIn("Refunding sends 200 Stars back to user 777 and takes 100 images from chat 111", reply)
-        self.assertIn("Only 95 of its 100 images are left", reply)
+        self.assertIn("Refunding sends 200 Stars back to user 777 and takes 100 images from chat 111 "
+                      "(balance 95 -> 0)", reply)
+        self.assertIn("so 5 have been used. Counting the oldest first, 5 of this pack's 100 images were "
+                      "among them.", reply)
+        self.assertIn("Only 95 images are left, so the balance will go to 0.", reply)
         self.assertIn("/refund ch1 confirm", reply)
         self.assertEqual(self._refund_calls(), [])
         self.assertEqual(self.quota.balance(BUYER), 95)
+
+    def test_refunding_a_spent_pack_says_whose_images_it_takes(self):
+        # ch1 fully spent, then an untouched later pack: the refund would take ch2's images
+        self.quota.reserve(BUYER, 95)
+        self.quota.credit(BUYER, PAYER, "ch2", "large", 1000, 1000)
+        reply = self._reply("/refund ch1")
+        self.assertIn("(balance 1000 -> 900)", reply)
+        self.assertIn("Chat 111 has been given 1100 bought or granted images and has 1000 left, so 100 have "
+                      "been used. Counting the oldest first, 100 of this pack's 100 images were among them. "
+                      "The refund therefore takes 100 images that came from other purchases or grants.", reply)
+        # The later, untouched pack is described as untouched
+        self.assertNotIn("have been used", self._reply("/refund ch2"))
 
     def test_confirmed_refund_pays_the_payer_takes_the_credits_and_is_audited(self):
         with patch("builtins.print") as mock_print:
@@ -155,14 +185,16 @@ class TestRefund(AdminTestCase):
         # The payer's user id, recorded at purchase: in a group it isn't the chat id
         self.assertEqual(self._refund_calls(), [{"user_id": PAYER, "telegram_payment_charge_id": "ch1"}])
         self.assertEqual(self.quota.balance(BUYER), 0)
-        self.assertIn("Took 95 images from chat 111; its balance is now 0.", reply)
-        self.assertIn("5 of the pack's images had already been used", reply)
-        audit = [str(c) for c in mock_print.call_args_list if "ADMIN AUDIT" in str(c)]
+        self.assertEqual(reply, "Refunded 200 Stars to user 777 for charge ch1. Took 95 images from chat 111; "
+                                "its balance is now 0. 5 could not be taken back: the chat had no images left.")
+        audit = self._audit(mock_print)
         self.assertEqual(len(audit), 1)
         for part in ("action=refund", "charge='ch1'", "user='777'", "stars=200", "images_taken=95",
-                     "balance_before=95", "balance_after=0"):
+                     "balance_before=95", "balance_after=0", "pack_images_used=5"):
             self.assertIn(part, audit[0])
-        self.assertTrue(self.quota.charge("ch1")["refunded"])
+        charge = self.quota.charge("ch1")
+        self.assertTrue(charge["refunded"])
+        self.assertNotIn("refund_pending", charge)
         self.assertIn("REFUNDED", self._reply("/charges 111"))
 
     def test_refund_is_idempotent(self):
@@ -171,25 +203,88 @@ class TestRefund(AdminTestCase):
         self.assertIn("already refunded", self._reply("/refund ch1"))
         self.assertEqual(len(self._refund_calls()), 1)
 
+    def test_only_one_finish_can_take_the_images_back(self):
+        # Two confirms racing past Telegram (the second is told CHARGE_ALREADY_REFUNDED)
+        self.assertTrue(self.quota.begin_refund("ch1", BUYER))
+        self.assertTrue(self.quota.begin_refund("ch1", BUYER))  # a pending refund can be resumed
+        self.assertTrue(self.quota.finish_refund("ch1", BUYER))
+        self.assertFalse(self.quota.finish_refund("ch1", BUYER))
+        self.assertFalse(self.quota.begin_refund("ch1", BUYER))
+
     def test_unspent_pack_is_taken_back_whole(self):
         self.quota.credit(BUYER, PAYER, "ch2", "large", 1000, 1000)
         reply = self._reply("/refund ch2 confirm")
         self.assertIn("Took 1000 images from chat 111; its balance is now 95.", reply)
-        self.assertNotIn("already been used", reply)
+        self.assertNotIn("could not be taken back", reply)
 
-    def test_telegram_refusing_changes_nothing(self):
-        self.telegram.refuse["refundStarPayment"] = "CHARGE_ALREADY_REFUNDED"
+    def test_definite_refusal_changes_nothing(self):
+        self.telegram.refuse["refundStarPayment"] = "USER_BOT_REQUIRED"
         with patch("builtins.print") as mock_print:
             reply = self._reply("/refund ch1 confirm")
         self.assertEqual(reply, "Telegram refused the refund, so nothing changed: "
-                                "refundStarPayment failed: CHARGE_ALREADY_REFUNDED")
-        self.assertTrue(any("action=refund-failed" in str(c) for c in mock_print.call_args_list))
+                                "refundStarPayment failed: USER_BOT_REQUIRED")
+        self.assertTrue(any("action=refund-failed" in line for line in self._audit(mock_print)))
         self.assertEqual(self.quota.balance(BUYER), 95)
-        self.assertIsNone(self.quota.charge("ch1").get("refunded"))
-        self.assertNotIn("REFUNDED", self._reply("/charges 111"))
+        charge = self.quota.charge("ch1")
+        self.assertNotIn("refunded", charge)
+        self.assertNotIn("refund_pending", charge)
         # Nothing stayed flagged, so it can be tried again
         del self.telegram.refuse["refundStarPayment"]
         self.assertIn("Refunded 200 Stars", self._reply("/refund ch1 confirm"))
+
+    def test_already_refunded_at_telegram_counts_as_done(self):
+        self.telegram.refuse["refundStarPayment"] = "CHARGE_ALREADY_REFUNDED"
+        reply = self._reply("/refund ch1 confirm")
+        self.assertIn("Refunded 200 Stars to user 777", reply)
+        self.assertEqual(self.quota.balance(BUYER), 0)
+        self.assertTrue(self.quota.charge("ch1")["refunded"])
+
+    def test_no_answer_leaves_it_pending_and_a_retry_finishes_it_once(self):
+        self.telegram.unreachable.add("refundStarPayment")
+        with patch("builtins.print") as mock_print:
+            reply = self._reply("/refund ch1 confirm")
+        self.assertIn("may or may not have gone back", reply)
+        self.assertIn("Send /refund ch1 confirm again to finish", reply)
+        self.assertTrue(any("action=refund-unknown" in line for line in self._audit(mock_print)))
+        charge = self.quota.charge("ch1")
+        self.assertTrue(charge["refund_pending"])
+        self.assertNotIn("refunded", charge)
+        self.assertEqual(self.quota.balance(BUYER), 95)  # images untouched until it's known
+        self.assertIn("REFUND PENDING", self._reply("/charges 111"))
+        self.assertIn("its outcome is unknown", self._reply("/refund ch1"))
+
+        # The first call did reach Telegram: the retry is told so, and finishes the job once
+        self.telegram.unreachable.clear()
+        self.telegram.refuse["refundStarPayment"] = "CHARGE_ALREADY_REFUNDED"
+        self.assertIn("Refunded 200 Stars", self._reply("/refund ch1 confirm"))
+        self.assertEqual(self.quota.balance(BUYER), 0)
+        self.assertIn("already refunded", self._reply("/refund ch1 confirm"))
+        self.assertEqual(self.quota.balance(BUYER), 0)
+
+    def test_server_error_is_not_mistaken_for_a_refusal(self):
+        self.telegram.refuse["refundStarPayment"] = ("Internal Server Error", 500)
+        self.assertIn("may or may not have gone back", self._reply("/refund ch1 confirm"))
+        self.assertTrue(self.quota.charge("ch1")["refund_pending"])
+
+    def test_failed_rollback_is_loud_and_leaves_a_resolvable_pending_refund(self):
+        self.telegram.refuse["refundStarPayment"] = "USER_BOT_REQUIRED"
+        original = self.db.update_item
+
+        def rollback_fails(**kwargs):
+            if kwargs["UpdateExpression"] == "REMOVE refund_pending":
+                raise _ClientError("InternalServerError")
+            return original(**kwargs)
+        self.db.update_item = rollback_fails
+        with patch("builtins.print") as mock_print:
+            reply = self._reply("/refund ch1 confirm")
+        logged = [str(c) for c in mock_print.call_args_list]
+        self.assertIn("Telegram refused the refund, so nothing changed", reply)
+        self.assertTrue(any("REFUND ROLLBACK FAILED charge=ch1" in line for line in logged))
+        self.assertTrue(any("action=refund-failed" in line for line in logged))
+        # Stuck pending rather than stuck refunded: the next attempt resolves it
+        self.db.update_item = original
+        self.assertIn("Telegram refused the refund", self._reply("/refund ch1 confirm"))
+        self.assertNotIn("refund_pending", self.quota.charge("ch1"))
 
     def test_refund_whose_credit_deduction_fails_is_still_audited(self):
         with patch.object(self.quota, "deduct", side_effect=_ClientError("InternalServerError")), \
@@ -197,7 +292,7 @@ class TestRefund(AdminTestCase):
             reply = self._reply("/refund ch1 confirm")
         self.assertIn("Refunded 200 Stars to user 777", reply)
         self.assertIn("taking the 100 images back from chat 111 failed", reply)
-        audit = [str(c) for c in mock_print.call_args_list if "ADMIN AUDIT" in str(c)]
+        audit = self._audit(mock_print)
         self.assertEqual(len(audit), 1)
         self.assertIn("images_taken=0", audit[0])
         # Money moved, so it stays refunded: a retry must not refund it again
@@ -207,6 +302,34 @@ class TestRefund(AdminTestCase):
     def test_unknown_charge(self):
         self.assertEqual(self._reply("/refund nope confirm"), "No purchase has charge id nope.")
         self.assertEqual(self._refund_calls(), [])
+
+
+class TestReplies(AdminTestCase):
+
+    def test_long_replies_are_split_under_telegrams_limit(self):
+        for i in range(120):
+            self.quota.credit(BUYER, PAYER, f"charge-with-a-long-id-{i:03d}", "small", 100, 200)
+        with patch.object(admin, "PAGE_SIZE", 1000):
+            self.assertTrue(admin.handle_command("bot-token", ADMIN, "/charges 111", self.quota, {str(ADMIN)}))
+        texts = self.telegram.texts()
+        self.assertGreater(len(texts), 1)
+        self.assertTrue(all(len(t) <= 4096 for t in texts))
+        self.assertEqual(sum(t.count("charge-with-a-long-id-") for t in texts), 120)
+
+    def test_charges_are_paginated(self):
+        for i in range(3):
+            self.quota.credit(BUYER, PAYER, f"c{i}", "small", 100, 200)
+        with patch.object(admin, "PAGE_SIZE", 2):
+            first, second = self._reply("/charges 111"), self._reply("/charges 111 2")
+        self.assertIn("page 1 of 2", first)
+        self.assertIn("Next: /charges 111 2", first)
+        self.assertEqual(len(second.splitlines()), 3)  # header + the remaining 2 of 4
+
+    def test_a_failed_reply_does_not_escape(self):
+        self.telegram.refuse["sendMessage"] = "Bad Request: message is too long"
+        with patch("builtins.print") as mock_print:
+            self.assertTrue(admin.handle_command("bot-token", ADMIN, "/admin", self.quota, {str(ADMIN)}))
+        self.assertTrue(any("admin reply to 900 failed" in str(c) for c in mock_print.call_args_list))
 
 
 class TestGating(AdminTestCase):

@@ -23,7 +23,7 @@ HELP_TEXT = (
     "Admin commands\n"
     "/users [page] - Chats with any usage or balance, most active this month first.\n"
     "/usage <chat id> - One chat: this month, balance, lifetime total, recent purchases.\n"
-    "/charges <chat id> - A chat's purchases, with charge ids for /refund.\n"
+    "/charges <chat id> [page] - A chat's purchases, with charge ids for /refund.\n"
     "/limits - The configured limits and today's free usage.\n"
     "/stats - Totals across all chats.\n"
     "/grant <chat id> <images> [reason] - Add images to a chat's balance. No money moves.\n"
@@ -49,8 +49,28 @@ def handle_command(bot_token, chat_id, text, quota, admins):
         except Exception as e:
             print(f"admin command {command} failed for {chat_id}: {e}")
             reply = f"Error: {e}"
-    payments._send(bot_token, chat_id, reply)
+    try:
+        _send_long(bot_token, chat_id, reply)
+    except Exception as e:
+        print(f"admin reply to {chat_id} failed: {e}")
     return True
+
+
+def _send_long(bot_token, chat_id, text, limit=4000):
+    """Send text in as many messages as Telegram's 4096-character limit needs,
+    splitting between lines."""
+    chunks, current = [], ""
+    for line in text.split("\n"):
+        while len(line) > limit:
+            chunks.append(line[:limit])
+            line = line[limit:]
+        if current and len(current) + 1 + len(line) > limit:
+            chunks.append(current)
+            current = line
+        else:
+            current = f"{current}\n{line}" if current else line
+    for chunk in chunks + [current]:
+        payments._send(bot_token, chat_id, chunk)
 
 
 def _audit(admin, action, **fields):
@@ -107,11 +127,11 @@ def _chats(quota):
             row["free"] = images
         elif sk == "balance":
             row["balance"] = images
-    return {chat: row for chat, row in chats.items() if row["month"] or row["balance"] or row["lifetime"]}
+    return {chat: row for chat, row in chats.items() if any(row.values())}
 
 
 def _users(bot_token, chat_id, args, quota):
-    page = int(args[0]) if args and args[0].isdigit() and int(args[0]) > 0 else 1
+    page = _page_arg(args, 0)
     chats = sorted(_chats(quota).items(), key=lambda kv: (-kv[1]["month"], -kv[1]["lifetime"], kv[0]))
     if not chats:
         return "No chats have used the bot yet."
@@ -128,7 +148,12 @@ def _users(bot_token, chat_id, args, quota):
 
 def _charge_line(charge_id, attrs):
     when = (attrs.get("ts") or "")[:10]
-    refunded = f" - REFUNDED {attrs['refunded'][:10]}" if attrs.get("refunded") else ""
+    if attrs.get("refunded"):
+        refunded = f" - REFUNDED {attrs['refunded'][:10]}"
+    elif attrs.get("refund_pending"):
+        refunded = f" - REFUND PENDING since {attrs['refund_pending'][:16]}"
+    else:
+        refunded = ""
     return (f"{when} {attrs.get('pack')}: {attrs.get('images')} images for {attrs.get('stars')} Stars, "
             f"payer {attrs.get('user_id')}, charge {charge_id}{refunded}")
 
@@ -159,14 +184,24 @@ def _usage(bot_token, chat_id, args, quota):
     return "\n".join(lines)
 
 
+def _page_arg(args, index):
+    arg = args[index] if len(args) > index else ""
+    return int(arg) if arg.isdigit() and int(arg) > 0 else 1
+
+
 @_usage_reply
 def _charges(bot_token, chat_id, args, quota):
-    target = _chat_arg(args, "/charges <chat id>")
+    target = _chat_arg(args, "/charges <chat id> [page]")
     charges = _charges_of(quota.chat_records(target))
     if not charges:
         return f"Chat {target} hasn't bought anything."
-    return "\n".join([f"Purchases of chat {target}, latest first:"] +
-                     ["- " + _charge_line(cid, a) for cid, a in charges])
+    pages = (len(charges) + PAGE_SIZE - 1) // PAGE_SIZE
+    page = min(_page_arg(args, 1), pages)
+    lines = [f"Purchases of chat {target}, latest first - page {page} of {pages}:"]
+    lines += ["- " + _charge_line(cid, a) for cid, a in charges[(page - 1) * PAGE_SIZE:page * PAGE_SIZE]]
+    if page < pages:
+        lines.append(f"Next: /charges {target} {page + 1}")
+    return "\n".join(lines)
 
 
 def _limits(bot_token, chat_id, args, quota):
@@ -210,10 +245,24 @@ def _grant(bot_token, chat_id, args, quota):
     if len(args) < 2 or not args[1].isdigit() or not 0 < int(args[1]) <= MAX_GRANT:
         raise _Usage(f"{usage} - images must be 1 to {MAX_GRANT}")
     images, reason = int(args[1]), " ".join(args[2:])
-    after = quota.grant(target, images)
+    after = quota.grant(target, images, chat_id, reason)
     _audit(chat_id, "grant", chat=target, images=images, reason=reason,
            balance_before=after - images, balance_after=after)
     return f"Granted {images} images to chat {target}. Its balance went from {after - images} to {after}."
+
+
+def _pack_usage(records, charge_id, charge):
+    """How many of this pack's images have already been used, counting a chat's
+    credits as used oldest first. Credits are pooled, so this is an attribution, not a
+    ledger: (credited, left, used, used_from_this_pack)."""
+    credits = [(a.get("ts") or "", sk, a.get("images", 0)) for sk, a in records.items()
+               if (sk.startswith("charge#") and not a.get("refunded")) or sk.startswith("grant#")]
+    credited = sum(images for _, _, images in credits)
+    left = records.get("balance", {}).get("images", 0)
+    used = max(0, credited - left)
+    this = ((charge.get("ts") or ""), f"charge#{charge_id}")
+    before = sum(images for ts, sk, images in credits if (ts, sk) < this)
+    return credited, left, used, max(0, min(charge["images"], used - before))
 
 
 @_usage_reply
@@ -227,26 +276,50 @@ def _refund(bot_token, chat_id, args, quota):
     if charge.get("refunded"):
         return f"Charge {charge_id} was already refunded on {charge['refunded'][:10]}."
     target, images, stars, payer = charge["chat_id"], charge["images"], charge["stars"], charge["user_id"]
-    balance = quota.balance(target)
-    shortfall = max(0, images - balance)
-    note = (f" Only {balance} of its {images} images are left: the balance will go to 0, and the other "
-            f"{shortfall} were already used." if shortfall else "")
+    credited, balance, used, pack_used = _pack_usage(quota.chat_records(target), charge_id, charge)
 
     if not confirm:
-        return (f"Charge {charge_id}: {_charge_line(charge_id, charge)}\n"
-                f"Refunding sends {stars} Stars back to user {payer} and takes {images} images from chat "
-                f"{target} (balance {balance} -> {max(0, balance - images)}).{note}\n"
-                f"To go ahead: /refund {charge_id} confirm")
+        lines = [f"Charge {charge_id}: {_charge_line(charge_id, charge)}",
+                 f"Refunding sends {stars} Stars back to user {payer} and takes {images} images from chat "
+                 f"{target} (balance {balance} -> {max(0, balance - images)})."]
+        if pack_used:
+            # What the refund takes beyond this pack's own unused images belongs to other credits
+            from_others = max(0, min(images, balance) - (images - pack_used))
+            line = (f"Chat {target} has been given {credited} bought or granted images and has {balance} left, "
+                    f"so {used} have been used. Counting the oldest first, {pack_used} of this pack's {images} "
+                    "images were among them.")
+            if from_others:
+                line += f" The refund therefore takes {from_others} images that came from other purchases or grants."
+            lines.append(line)
+        if balance < images:
+            lines.append(f"Only {balance} images are left, so the balance will go to 0.")
+        if charge.get("refund_pending"):
+            lines.append(f"A refund of this charge was started {charge['refund_pending'][:16]} and its outcome "
+                         "is unknown. Confirming finishes it safely: Telegram never pays a charge twice.")
+        lines.append(f"To go ahead: /refund {charge_id} confirm")
+        return "\n".join(lines)
 
-    # Flag first, so a repeated confirm can never reach Telegram twice
-    if not quota.mark_refunded(charge_id, target):
+    if not quota.begin_refund(charge_id, target):
         return f"Charge {charge_id} was already refunded."
     try:
         payments.refund_star_payment(bot_token, payer, charge_id)
+    except payments.TelegramError as e:
+        if "CHARGE_ALREADY_REFUNDED" not in str(e):
+            quota.abandon_refund(charge_id, target)
+            _audit(chat_id, "refund-failed", charge=charge_id, chat=target, user=payer, error=str(e))
+            return f"Telegram refused the refund, so nothing changed: {e}"
+        # The Stars went back already (an earlier attempt whose answer was lost): finish it
     except Exception as e:
-        quota.unmark_refunded(charge_id, target)
-        _audit(chat_id, "refund-failed", charge=charge_id, chat=target, user=payer, error=str(e))
-        return f"Telegram refused the refund, so nothing changed: {e}"
+        # No definite answer: the Stars may have gone back. Leave it pending - refunding
+        # twice is the expensive mistake, and a retry resolves it either way.
+        _audit(chat_id, "refund-unknown", charge=charge_id, chat=target, user=payer, error=str(e))
+        return (f"Telegram didn't give a clear answer ({e}), so the {stars} Stars may or may not have gone "
+                f"back. Charge {charge_id} is marked as refund pending. Send /refund {charge_id} confirm "
+                "again to finish: if the Stars already went back Telegram says so and only the images are "
+                "taken back; if not, they're refunded then.")
+
+    if not quota.finish_refund(charge_id, target):
+        return f"Charge {charge_id} was already refunded."
     # The Stars have gone back: from here on, whatever happens must be on record
     try:
         taken, after = quota.deduct(target, images)
@@ -257,11 +330,11 @@ def _refund(bot_token, chat_id, args, quota):
                 f"images back from chat {target} failed: {e}. The chat still has them; check with "
                 f"/usage {target}.")
     _audit(chat_id, "refund", charge=charge_id, chat=target, user=payer, stars=stars, images=images,
-           images_taken=taken, balance_before=balance, balance_after=after)
+           images_taken=taken, balance_before=balance, balance_after=after, pack_images_used=pack_used)
     reply = (f"Refunded {stars} Stars to user {payer} for charge {charge_id}. Took {taken} images from chat "
              f"{target}; its balance is now {after}.")
     if taken < images:
-        reply += f" {images - taken} of the pack's images had already been used and could not be taken back."
+        reply += f" {images - taken} could not be taken back: the chat had no images left."
     return reply
 
 

@@ -47,10 +47,12 @@ Items (pk / sk):
                                       the chat's /usecredits consent for that day
     chat#<id> / images#2026-09        every image the chat was given that month,
                                       free or bought: its usage history
+    chat#<id> / grant#<timestamp>     images an admin added (admin.py), with who and why
 Usage rows carry expires_at (epoch seconds) so DynamoDB TTL deletes them once
 their period and the one after it are over; a consent row, once its day is over.
-Balance, charge and images rows have no expires_at at all, so TTL never touches them. Keying by owner then record type
-keeps everything about one chat in one partition, readable with a single Query.
+Balance, charge, images and grant rows have no expires_at at all, so TTL never
+touches them. Keying by owner then record type keeps everything about one chat in
+one partition, readable with a single Query.
 """
 from datetime import datetime, timedelta, timezone
 
@@ -506,43 +508,74 @@ class ImageQuota:
                                 Key=self._item_key((f"charge#{charge_id}", "charge"))).get("Item")
         return _attributes(item) if item else None
 
-    def grant(self, chat_id, images):
-        """Add images to a chat's balance without a payment. Returns the new balance."""
+    def grant(self, chat_id, images, admin, reason):
+        """Add images to a chat's balance without a payment, recorded like a purchase so
+        the chat's history shows where its balance came from. Returns the new balance."""
+        when = self.now().isoformat()
+        self.db.put_item(TableName=self.table, Item={
+            "pk": {"S": f"chat#{chat_id}"}, "sk": {"S": f"grant#{when}"}, "images": {"N": str(images)},
+            "admin": {"S": str(admin)}, "reason": {"S": reason}, "ts": {"S": when}})
         return self._add(self._balance_key(chat_id), images)
 
-    def mark_refunded(self, charge_id, chat_id):
-        """Flag a charge as refunded, once: False if it doesn't exist or already is.
-        Set before the money moves, so a second /refund can never reach Telegram."""
+    # A refund goes through two recorded states, because the Telegram call in between
+    # can fail in a way that says nothing about whether the Stars moved:
+    #   begin_refund   refund_pending is set before Telegram is called
+    #   finish_refund  refunded is set (once, conditionally) after Telegram confirms
+    #   abandon_refund refund_pending is cleared after Telegram definitively refuses
+    # A charge left pending is finished by simply trying again: Telegram never pays a
+    # charge twice (it answers CHARGE_ALREADY_REFUNDED), and only one finish_refund can
+    # win, so the images are taken back exactly once.
+
+    def begin_refund(self, charge_id, chat_id):
+        """Mark a refund as in progress. False if the charge doesn't exist or is already
+        refunded; an earlier pending attempt is resumed."""
+        if not self._update_charge(charge_id, "SET refund_pending = :when",
+                                   "attribute_exists(pk) AND attribute_not_exists(refunded)"):
+            return False
+        self._mirror(charge_id, chat_id, "SET refund_pending = :when")
+        return True
+
+    def finish_refund(self, charge_id, chat_id):
+        """Record the refund as done. True only for the one call that records it."""
+        if not self._update_charge(charge_id, "SET refunded = :when REMOVE refund_pending",
+                                   "attribute_exists(pk) AND attribute_not_exists(refunded)"):
+            return False
+        self._mirror(charge_id, chat_id, "SET refunded = :when REMOVE refund_pending")
+        return True
+
+    def abandon_refund(self, charge_id, chat_id):
+        """Clear a pending refund that Telegram refused. Never raises: if it fails the
+        charge stays pending, which the next attempt resolves, and the log says which."""
+        try:
+            self.db.update_item(TableName=self.table, Key=self._item_key((f"charge#{charge_id}", "charge")),
+                                UpdateExpression="REMOVE refund_pending")
+        except Exception as e:
+            print(f"REFUND ROLLBACK FAILED charge={charge_id} (it stays pending; /refund resolves it): {e}")
+            return
+        self._mirror(charge_id, chat_id, "REMOVE refund_pending")
+
+    def _mirror(self, charge_id, chat_id, expression):
+        # The chat's copy is for display (/charges); the charge row is the source of truth
+        kwargs = {"TableName": self.table, "Key": self._item_key((f"chat#{chat_id}", f"charge#{charge_id}")),
+                  "UpdateExpression": expression}
+        if ":when" in expression:
+            kwargs["ExpressionAttributeValues"] = {":when": {"S": self.now().isoformat()}}
+        try:
+            self.db.update_item(**kwargs)
+        except Exception as e:
+            print(f"refund state on the chat's copy failed chat={chat_id} charge={charge_id}: {e}")
+
+    def _update_charge(self, charge_id, expression, condition):
         try:
             self.db.update_item(
                 TableName=self.table, Key=self._item_key((f"charge#{charge_id}", "charge")),
-                UpdateExpression="SET refunded = :when",
-                ConditionExpression="attribute_exists(pk) AND attribute_not_exists(refunded)",
+                UpdateExpression=expression, ConditionExpression=condition,
                 ExpressionAttributeValues={":when": {"S": self.now().isoformat()}})
+            return True
         except Exception as e:
             if _error_code(e) == "ConditionalCheckFailedException":
                 return False
             raise
-        self._set_pointer_refunded(charge_id, chat_id, True)
-        return True
-
-    def unmark_refunded(self, charge_id, chat_id):
-        """Undo mark_refunded when Telegram refused the refund."""
-        self.db.update_item(TableName=self.table, Key=self._item_key((f"charge#{charge_id}", "charge")),
-                            UpdateExpression="REMOVE refunded")
-        self._set_pointer_refunded(charge_id, chat_id, False)
-
-    def _set_pointer_refunded(self, charge_id, chat_id, refunded):
-        # The chat's copy is for display (/charges); the charge row is the source of truth
-        try:
-            key = self._item_key((f"chat#{chat_id}", f"charge#{charge_id}"))
-            if refunded:
-                self.db.update_item(TableName=self.table, Key=key, UpdateExpression="SET refunded = :when",
-                                    ExpressionAttributeValues={":when": {"S": self.now().isoformat()}})
-            else:
-                self.db.update_item(TableName=self.table, Key=key, UpdateExpression="REMOVE refunded")
-        except Exception as e:
-            print(f"refund flag on the chat's copy failed chat={chat_id} charge={charge_id}: {e}")
 
     def deduct(self, chat_id, images):
         """Take up to images from the balance, never below zero.

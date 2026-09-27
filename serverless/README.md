@@ -237,15 +237,19 @@ chats: every member of an admin group chat would be an admin.
 |---|---|
 | `/users [page]` | Chats with any usage or balance, most active this month first |
 | `/usage <chat id>` | One chat: this month, free used, bought images left, lifetime total, recent purchases |
-| `/charges <chat id>` | A chat's purchases, with the charge ids `/refund` needs |
+| `/charges <chat id> [page]` | A chat's purchases, with the charge ids `/refund` needs |
 | `/limits` | The configured limits and how much of today's free cap is used |
 | `/stats` | Totals: images this month, active chats, images sold and Stars taken |
 | `/grant <chat id> <images> [reason]` | Add images to a chat's balance. No money moves; prefer this for goodwill or to fix a billing mistake |
 | `/refund <charge id>` | Show what refunding a purchase would do; `/refund <charge id> confirm` does it |
 
 - A refund sends the Stars back to the person who paid, takes the pack's images
-  back (never below zero; the reply says if some were already used), and can only
-  happen once per purchase. If Telegram refuses, nothing changes.
+  back (never below zero), and can only happen once per purchase. The preview says
+  if the pack's images were already used, counting the oldest purchases first, and
+  so how many would come out of later purchases.
+- If Telegram refuses, nothing changes. If it gives no clear answer (a timeout, a
+  server error), the purchase is marked "refund pending" and nothing else happens;
+  confirming again finishes it safely, since Telegram never pays a charge twice.
 - `/grant` and `/refund` each write an `ADMIN AUDIT` line to the logs:
   `./serverless/deploy.sh logs | grep "ADMIN AUDIT"`.
 - For anyone else these commands behave like any unknown command: no reply, and
