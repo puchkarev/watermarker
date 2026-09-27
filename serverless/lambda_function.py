@@ -12,9 +12,9 @@ The receiver answers immediately because Telegram re-sends an update when the
 webhook is slow, which would process the same zip more than once.
 
 The only things kept between runs are each chat's configuration (its settings
-JSON and its /source watermark image, tiny objects in S3) and the image
-counters in DynamoDB (quota.py). Photos and zips only ever live in /tmp for the
-duration of one invocation.
+JSON and its /source watermark image, tiny objects in S3) and, in DynamoDB, the
+image counters, bought credits and purchase records (quota.py, payments.py).
+Photos and zips only ever live in /tmp for the duration of one invocation.
 
 Environment variables:
     BOT_TOKEN         Telegram bot token
@@ -42,6 +42,7 @@ for _path in (_HERE, os.path.dirname(_HERE)):
     if os.path.exists(os.path.join(_path, "watermarker.py")) and _path not in sys.path:
         sys.path.insert(0, _path)
 
+import payments
 import watermarker
 from quota import ImageQuota
 
@@ -130,6 +131,22 @@ def receive(event, context):
     except ValueError:
         # Answer 200 so Telegram doesn't keep re-sending something we can't parse
         print("Ignoring update with an unparseable body")
+        return _response(200)
+
+    # Payments are handled here rather than in the worker. A pre-checkout query must be
+    # answered within 10 seconds or Telegram cancels the payment, and a completed payment
+    # must be credited before we answer: a 500 makes Telegram deliver it again, which is
+    # safe because crediting is idempotent, whereas a failure in the worker would be lost.
+    # Both come before the allowlist, so money is never taken without being credited.
+    if "pre_checkout_query" in update:
+        payments.handle_pre_checkout(os.environ["BOT_TOKEN"], update["pre_checkout_query"], _quota())
+        return _response(200)
+    if "successful_payment" in update.get("message", {}):
+        try:
+            payments.handle_successful_payment(os.environ["BOT_TOKEN"], update["message"], _quota())
+        except Exception as e:
+            print(f"PAYMENT CREDIT FAILED, asking Telegram to retry: {e}")
+            return _response(500, "retry")
         return _response(200)
 
     chat_id = _chat_id(update)
@@ -246,7 +263,9 @@ def run_task(event):
 
     _prepare_work_dir()
     try:
-        watermarker.QUOTA = _quota()
+        watermarker.QUOTA = quota = _quota()
+        watermarker.EXTRA_COMMANDS = lambda token, chat, text: payments.handle_command(token, chat, text, quota)
+        watermarker.EXTRA_HELP = payments.HELP_TEXT
         before = pull_state(bucket, chat_id)
         watermarker.handle_update(bot_token, update)
         push_state(bucket, chat_id, before)

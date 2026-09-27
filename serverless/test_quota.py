@@ -22,8 +22,22 @@ FREE_CHAT = 111
 UNLIMITED_CHAT = 5173725149
 
 
+class _ClientError(Exception):
+    """Shaped like botocore's ClientError."""
+    def __init__(self, code, reasons=None):
+        super().__init__(code)
+        self.response = {"Error": {"Code": code}}
+        if reasons is not None:
+            self.response["CancellationReasons"] = reasons
+
+
+def _plain(value):
+    return int(value["N"]) if "N" in value else value["S"]
+
+
 class FakeDynamo:
-    """Just enough of DynamoDB for quota.py: atomic ADD with UPDATED_NEW, and GetItem."""
+    """Just enough of DynamoDB for quota.py: atomic ADD with UPDATED_NEW, the
+    "images >= :need" condition, GetItem, and TransactWriteItems."""
 
     def __init__(self):
         self.items = {}
@@ -31,21 +45,51 @@ class FakeDynamo:
 
     @staticmethod
     def _key(Key):
-        assert set(Key) == {"pk", "sk"}, Key
+        assert {"pk", "sk"} <= set(Key), Key
         return Key["pk"]["S"], Key["sk"]["S"]
 
-    def update_item(self, TableName, Key, UpdateExpression, ExpressionAttributeValues, ReturnValues):
+    def update_item(self, TableName, Key, UpdateExpression, ExpressionAttributeValues, ReturnValues=None,
+                    ConditionExpression=None):
         assert UpdateExpression.startswith("ADD images :n")
         sets_expiry = "SET expires_at = if_not_exists(expires_at, :exp)" in UpdateExpression
         assert sets_expiry == (":exp" in ExpressionAttributeValues), UpdateExpression
         key = self._key(Key)
         delta = int(ExpressionAttributeValues[":n"]["N"])
         with self.lock:
+            if ConditionExpression is not None:
+                assert ConditionExpression == "images >= :need", ConditionExpression
+                current = self.items.get(key)
+                if current is None or current["images"] < int(ExpressionAttributeValues[":need"]["N"]):
+                    raise _ClientError("ConditionalCheckFailedException")
             item = self.items.setdefault(key, {"images": 0})
             if sets_expiry:
                 item.setdefault("expires_at", int(ExpressionAttributeValues[":exp"]["N"]))
             item["images"] += delta
             return {"Attributes": {"images": {"N": str(item["images"])}}}
+
+    def transact_write_items(self, TransactItems):
+        with self.lock:
+            reasons, failed = [], False
+            for op in TransactItems:
+                put = op.get("Put")
+                if put and put.get("ConditionExpression"):
+                    assert put["ConditionExpression"] == "attribute_not_exists(pk)"
+                    if self._key(put["Item"]) in self.items:
+                        reasons.append({"Code": "ConditionalCheckFailed"})
+                        failed = True
+                        continue
+                reasons.append({"Code": "None"})
+            if failed:
+                raise _ClientError("TransactionCanceledException", reasons)
+            for op in TransactItems:
+                if "Put" in op:
+                    item = op["Put"]["Item"]
+                    self.items[self._key(item)] = {k: _plain(v) for k, v in item.items() if k not in ("pk", "sk")}
+                else:
+                    update = op["Update"]
+                    assert update["UpdateExpression"] == "ADD images :n"
+                    row = self.items.setdefault(self._key(update["Key"]), {"images": 0})
+                    row["images"] += int(update["ExpressionAttributeValues"][":n"]["N"])
 
     def get_item(self, TableName, Key):
         item = self.items.get(self._key(Key))
@@ -84,8 +128,8 @@ class TestImageQuota(unittest.TestCase):
     def test_personal_limit_names_the_user_quota(self):
         self.quota.reserve(FREE_CHAT, 10)
         message = self.quota.reserve(FREE_CHAT, 1)
-        self.assertEqual(message, "Monthly limit reached: you've used 10 of your 10 images this month. "
-                                  "Your allowance resets at 00:00 UTC on 1 October (in 4d 1h).")
+        self.assertEqual(message, "Monthly limit reached: you've used 10 of your 10 free images this month. "
+                                  "Buy more with /buy, or wait until your allowance resets at 00:00 UTC on 1 October (in 4d 1h).")
         # The refused request took nothing
         self.assertEqual(self.db.total((f"chat#{FREE_CHAT}", "usage#2026-09")), 10)
         self.assertEqual(self.db.total(("system", "usage#2026-09-26")), 10)
@@ -93,16 +137,16 @@ class TestImageQuota(unittest.TestCase):
     def test_batch_bigger_than_what_is_left_is_refused_whole(self):
         self.quota.reserve(FREE_CHAT, 7)
         message = self.quota.reserve(FREE_CHAT, 5)
-        self.assertEqual(message, "That zip contains 5 images, but you have 3 of your 10 left this month. "
-                                  "Nothing was processed - your allowance resets at 00:00 UTC on 1 October (in 4d 1h).")
+        self.assertEqual(message, "That zip contains 5 images, but you have 3 left (3 free this month + 0 "
+                                  "bought), so it is 2 short. Nothing was processed - buy more with /buy, or "
+                                  "split the zip. Your free allowance resets at 00:00 UTC on 1 October (in 4d 1h).")
         self.assertEqual(self.db.total((f"chat#{FREE_CHAT}", "usage#2026-09")), 7)
         self.assertEqual(self.db.total(("system", "usage#2026-09-26")), 7)
 
-    def test_batch_bigger_than_the_whole_allowance_says_so(self):
-        # Retrying next month wouldn't help, so the message doesn't suggest it
+    def test_batch_bigger_than_the_whole_allowance_says_how_short_it_is(self):
         message = self.quota.reserve(FREE_CHAT, 20)
-        self.assertEqual(message, "That zip contains 20 images, which is more than your monthly allowance of 10. "
-                                  "Try splitting it into smaller zips.")
+        self.assertIn("That zip contains 20 images, but you have 10 left (10 free this month + 0 bought), "
+                      "so it is 10 short.", message)
         self.assertEqual(self.db.total((f"chat#{FREE_CHAT}", "usage#2026-09")), 0)
         self.assertEqual(self.db.total(("system", "usage#2026-09-26")), 0)
 
@@ -113,28 +157,30 @@ class TestImageQuota(unittest.TestCase):
         message = quota.reserve(UNLIMITED_CHAT, 20)
         self.assertIn("across all users", message)
         self.assertNotIn("your 10 images", message)
-        self.assertEqual(message, "That zip contains 20 images, but the bot has 10 of its daily 50 left across "
-                                  "all users. Nothing was processed - please try again after 00:00 UTC (in 1h 30m).")
+        self.assertEqual(message, "That zip contains 20 images, but the bot has 10 of its daily 50 free images "
+                                  "left across all users. Nothing was processed - please try again after "
+                                  "00:00 UTC (in 1h 30m).")
         self.assertEqual(quota.reserve(UNLIMITED_CHAT, 60),
-                         "That zip contains 60 images, which is more than the bot's daily limit of 50 across "
-                         "all users. Try splitting it into smaller zips.")
+                         "That zip contains 60 images, which is more than the bot's daily limit of 50 free "
+                         "images across all users. Try splitting it into smaller zips.")
         self.assertEqual(self.db.total(("system", "usage#2026-09-26")), 40)
 
     def test_system_limit_names_the_system_quota(self):
         quota = _quota(self.db, system=12)
         quota.reserve(UNLIMITED_CHAT, 12)
         self.assertEqual(quota.reserve(FREE_CHAT, 1),
-                         "The bot has reached its daily limit of 12 images across all users. "
-                         "Please try again after 00:00 UTC (in 1h 30m).")
+                         "The bot has reached its daily limit of 12 free images across all users. "
+                         "Please try again after 00:00 UTC (in 1h 30m). Bought images aren't affected by "
+                         "this limit - see /buy.")
         # A free chat blocked by the system limit doesn't lose personal allowance
         self.assertEqual(self.db.total((f"chat#{FREE_CHAT}", "usage#2026-09")), 0)
 
     def test_messages_use_configured_limits(self):
         quota = _quota(self.db, free=3, system=7)
         quota.reserve(FREE_CHAT, 3)
-        self.assertIn("used 3 of your 3 images", quota.reserve(FREE_CHAT, 1))
+        self.assertIn("used 3 of your 3 free images", quota.reserve(FREE_CHAT, 1))
         quota.reserve(UNLIMITED_CHAT, 4)
-        self.assertIn("daily limit of 7 images", quota.reserve(UNLIMITED_CHAT, 1))
+        self.assertIn("daily limit of 7 free images", quota.reserve(UNLIMITED_CHAT, 1))
 
     def test_release_refunds_both_counters(self):
         self.quota.reserve(FREE_CHAT, 10)
@@ -202,8 +248,9 @@ class TestImageQuota(unittest.TestCase):
     def test_failed_refund_is_logged_not_raised_and_other_refund_still_runs(self):
         class RefundFails(FakeDynamo):
             def update_item(self, **kwargs):
-                pk = kwargs["Key"]["pk"]["S"]
-                if int(kwargs["ExpressionAttributeValues"][":n"]["N"]) < 0 and pk.startswith("chat#"):
+                pk, sk = kwargs["Key"]["pk"]["S"], kwargs["Key"]["sk"]["S"]
+                if int(kwargs["ExpressionAttributeValues"][":n"]["N"]) < 0 and pk.startswith("chat#") \
+                        and sk.startswith("usage#"):
                     raise RuntimeError("ProvisionedThroughputExceededException")
                 return super().update_item(**kwargs)
 
@@ -214,12 +261,13 @@ class TestImageQuota(unittest.TestCase):
             message = quota.reserve(FREE_CHAT, 3)
         self.assertIn("Monthly limit reached", message)
         self.assertTrue(any("quota refund failed" in str(c) for c in mock_print.call_args_list))
-        # The chat refund failed, but the system refund still ran
+        # The chat refund failed and was logged; the refusal itself still stands, and the
+        # system count, which never included this job, is unchanged
         self.assertEqual(db.total(("system", "usage#2026-09-26")), 10)
 
     def test_zero_free_allowance_messages(self):
         quota = _quota(self.db, free=0)
-        message = "This bot has no free image allowance for your chat."
+        message = "This bot has no free image allowance for your chat. Buy images with /buy."
         self.assertEqual(quota.reserve(FREE_CHAT, 1), message)
         self.assertEqual(quota.reserve(FREE_CHAT, 20), message)
         self.assertEqual(quota.check(FREE_CHAT), message)
@@ -227,9 +275,10 @@ class TestImageQuota(unittest.TestCase):
 
     def test_zero_system_limit_message(self):
         quota = _quota(self.db, system=0)
-        message = "This bot isn't processing images at the moment (its daily limit is 0)."
+        message = "This bot isn't processing free images at the moment (its daily limit is 0)."
         self.assertEqual(quota.reserve(UNLIMITED_CHAT, 1), message)
-        self.assertEqual(quota.check(FREE_CHAT), message)
+        # A chat that could buy is told that bought images aren't limited by it
+        self.assertEqual(quota.check(FREE_CHAT), message + " Bought images aren't affected by this limit - see /buy.")
 
     def test_rows_expire_after_the_period_following_their_own(self):
         self.quota.reserve(FREE_CHAT, 1)
@@ -311,6 +360,129 @@ class TestImageQuota(unittest.TestCase):
         self.assertEqual(self.db.total(("system", "usage#2026-09-26")), 98)
 
 
+BALANCE = (f"chat#{FREE_CHAT}", "balance")
+USAGE = (f"chat#{FREE_CHAT}", "usage#2026-09")
+SYSTEM = ("system", "usage#2026-09-26")
+
+
+class TestBoughtCredits(unittest.TestCase):
+
+    def setUp(self):
+        self.db = FakeDynamo()
+        self.quota = _quota(self.db)
+
+    def _buy(self, images, charge="ch1", quota=None):
+        return (quota or self.quota).credit(FREE_CHAT, 777, charge, "small", images, 200)
+
+    def test_free_allowance_is_spent_before_the_balance(self):
+        self._buy(50)
+        self.assertIsNone(self.quota.reserve(FREE_CHAT, 4))
+        self.assertEqual((self.db.total(USAGE), self.db.total(BALANCE)), (4, 50))
+        self.assertIsNone(self.quota.reserve(FREE_CHAT, 15))  # 6 free + 9 bought
+        self.assertEqual((self.db.total(USAGE), self.db.total(BALANCE)), (10, 41))
+        # Bought images don't count towards the system cap; free ones do
+        self.assertEqual(self.db.total(SYSTEM), 10)
+
+    def test_partial_failure_returns_bought_images_first(self):
+        self.quota.reserve(FREE_CHAT, 5)
+        self._buy(30)
+        self.assertIsNone(self.quota.reserve(FREE_CHAT, 20))  # 5 free + 15 bought
+        self.assertEqual((self.db.total(USAGE), self.db.total(BALANCE)), (10, 15))
+        self.quota.release(FREE_CHAT, 3)
+        self.assertEqual((self.db.total(USAGE), self.db.total(BALANCE)), (10, 18))
+        self.quota.release(FREE_CHAT, 14)  # the other 12 bought, then 2 free
+        self.assertEqual((self.db.total(USAGE), self.db.total(BALANCE)), (8, 30))
+        self.assertEqual(self.db.total(SYSTEM), 8)
+
+    def test_not_enough_in_total_refuses_whole_zip_and_touches_nothing(self):
+        self.quota.reserve(FREE_CHAT, 5)
+        self._buy(3)
+        message = self.quota.reserve(FREE_CHAT, 20)
+        self.assertEqual(message, "That zip contains 20 images, but you have 8 left (5 free this month + 3 "
+                                  "bought), so it is 12 short. Nothing was processed - buy more with /buy, or "
+                                  "split the zip. Your free allowance resets at 00:00 UTC on 1 October (in 4d 1h).")
+        self.assertEqual((self.db.total(USAGE), self.db.total(BALANCE), self.db.total(SYSTEM)), (5, 3, 5))
+
+    def test_bought_images_are_not_limited_by_the_system_cap(self):
+        quota = _quota(self.db, system=10)
+        quota.reserve(UNLIMITED_CHAT, 10)
+        self._buy(20, quota=quota)
+        # Free images would be refused today, so the whole job runs on bought ones
+        self.assertIsNone(quota.reserve(FREE_CHAT, 5))
+        self.assertEqual((self.db.total(USAGE), self.db.total(BALANCE), self.db.total(SYSTEM)), (0, 15, 10))
+        quota.release(FREE_CHAT, 5)
+        self.assertEqual((self.db.total(USAGE), self.db.total(BALANCE), self.db.total(SYSTEM)), (0, 20, 10))
+        # Without enough bought images the system limit is what's reported, with the way out
+        self.assertIn("Bought images aren't affected by this limit - see /buy.", quota.reserve(FREE_CHAT, 25))
+        self.assertEqual(self.db.total(BALANCE), 20)
+
+    def test_unlimited_chats_never_use_a_balance(self):
+        self.quota.credit(UNLIMITED_CHAT, 1, "ch9", "small", 100, 200)
+        self.assertIsNone(self.quota.reserve(UNLIMITED_CHAT, 30))
+        self.assertEqual(self.db.total((f"chat#{UNLIMITED_CHAT}", "balance")), 100)
+
+    def test_redelivered_payment_is_credited_once(self):
+        self.assertTrue(self._buy(100))
+        self.assertFalse(self._buy(100))
+        self.assertEqual(self.db.total(BALANCE), 100)
+        self.assertTrue(self._buy(100, charge="ch2"))
+        self.assertEqual(self.db.total(BALANCE), 200)
+
+    def test_purchase_records_keep_the_payer_and_never_expire(self):
+        self.quota.credit(-100123, 777, "ch1", "large", 1000, 1000)
+        charge = self.db.items[("charge#ch1", "charge")]
+        pointer = self.db.items[("chat#-100123", "charge#ch1")]
+        for row in (charge, pointer):
+            # In a group the payer isn't the chat, and refundStarPayment needs the payer
+            self.assertEqual((row["chat_id"], row["user_id"], row["pack"], row["images"], row["stars"]),
+                             ("-100123", "777", "large", 1000, 1000))
+            self.assertNotIn("expires_at", row)
+        self.assertNotIn("expires_at", self.db.items[("chat#-100123", "balance")])
+
+    def test_other_transaction_failures_are_raised_not_treated_as_duplicates(self):
+        def conflict(**kwargs):
+            raise _ClientError("TransactionCanceledException", [{"Code": "TransactionConflict"}])
+        self.db.transact_write_items = conflict
+        with self.assertRaises(_ClientError):
+            self._buy(100)
+
+    def test_check_lets_a_chat_with_a_balance_through(self):
+        self.quota.reserve(FREE_CHAT, 10)
+        self.assertIn("Monthly limit reached", self.quota.check(FREE_CHAT))
+        self._buy(1)
+        self.assertIsNone(self.quota.check(FREE_CHAT))
+        quota = _quota(self.db, system=10)  # the day's free images are gone too
+        self.assertIsNone(quota.check(FREE_CHAT))
+
+    def test_status(self):
+        self.quota.reserve(FREE_CHAT, 3)
+        self._buy(100)
+        self.assertEqual(self.quota.status(FREE_CHAT),
+                         {"unlimited": False, "free_monthly": 10, "free_left": 7, "balance": 100,
+                          "resets": "00:00 UTC on 1 October (in 4d 1h)"})
+        self.assertTrue(self.quota.status(UNLIMITED_CHAT)["unlimited"])
+
+    def test_concurrent_zips_share_free_then_bought_images_exactly(self):
+        self._buy(40)
+        results = []
+        lock = threading.Lock()
+
+        def worker():
+            refusal = self.quota.reserve(FREE_CHAT, 7)
+            with lock:
+                results.append(refusal)
+
+        threads = [threading.Thread(target=worker) for _ in range(10)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        # 10 free + 40 bought = 50 = seven zips of 7 (49), with one image to spare
+        self.assertEqual(results.count(None), 7)
+        self.assertEqual(self.db.total(USAGE), 10)
+        self.assertEqual(self.db.total(BALANCE), 1)
+
+
 def _png():
     buf = BytesIO()
     Image.new('RGB', (64, 64), color='blue').save(buf, format='PNG')
@@ -387,7 +559,7 @@ class TestQuotaInTheBot(unittest.TestCase):
             watermarker.process_document("t", FREE_CHAT, {"file_id": "z", "file_name": "b.zip"})
         apply.assert_not_called()
         self.assertEqual(self.sent_docs, [])
-        self.assertIn("That zip contains 5 images, but you have 3 of your 10 left this month", self.messages[-1])
+        self.assertIn("That zip contains 5 images, but you have 3 left", self.messages[-1])
         self.assertEqual(self._chat_total(), 7)
         self.assertEqual(os.listdir(watermarker.TEMP_DIR), [])
 

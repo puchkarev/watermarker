@@ -105,9 +105,10 @@ Resources:
               - Effect: Allow
                 Action: s3:ListBucket
                 Resource: !GetAtt StateBucket.Arn
-              # Atomic image counters; Query reads everything about one chat
+              # Atomic image counters; Query reads everything about one chat; PutItem
+              # (inside a transaction) records each purchase exactly once
               - Effect: Allow
-                Action: [dynamodb:UpdateItem, dynamodb:GetItem, dynamodb:Query]
+                Action: [dynamodb:UpdateItem, dynamodb:GetItem, dynamodb:Query, dynamodb:PutItem]
                 Resource: !GetAtt QuotaTable.Arn
               # The receiver hands each update to itself asynchronously
               - Effect: Allow
