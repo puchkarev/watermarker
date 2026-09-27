@@ -1,4 +1,5 @@
 import json
+import re
 import os
 import shutil
 import sys
@@ -50,9 +51,10 @@ class FakeDynamo:
         return Key["pk"]["S"], Key["sk"]["S"]
 
     def update_item(self, TableName, Key, UpdateExpression, ExpressionAttributeValues=None, ReturnValues=None,
-                    ConditionExpression=None):
+                    ConditionExpression=None, ExpressionAttributeNames=None):
         if not UpdateExpression.startswith("ADD images"):
-            return self._update_refunded(Key, UpdateExpression, ExpressionAttributeValues, ConditionExpression)
+            return self._update_refunded(Key, UpdateExpression, ExpressionAttributeValues, ConditionExpression,
+                                         ExpressionAttributeNames)
         assert UpdateExpression.startswith("ADD images :n")
         sets_expiry = "SET expires_at = if_not_exists(expires_at, :exp)" in UpdateExpression
         assert sets_expiry == (":exp" in ExpressionAttributeValues), UpdateExpression
@@ -70,26 +72,31 @@ class FakeDynamo:
             item["images"] += delta
             return {"Attributes": {"images": {"N": str(item["images"])}}}
 
-    def _update_refunded(self, Key, UpdateExpression, values, condition):
-        """SET x = :v / REMOVE y on the refund attributes, with attribute_(not_)exists conditions."""
-        key = self._key(Key)
+    def _update_refunded(self, Key, UpdateExpression, values, condition, names=None):
+        """Any SET a = :v, ... / ADD n :v / REMOVE a, ... expression (#aliases resolved via
+        names), with attribute_(not_)exists conditions joined by AND."""
+        key, names, values = self._key(Key), names or {}, values or {}
         with self.lock:
             item = self.items.get(key)
-            for clause in (condition or "").split(" AND ") if condition else []:
+            for clause in condition.split(" AND ") if condition else []:
                 name = clause[clause.index("(") + 1:-1]
                 present = item is not None and (name == "pk" or name in item)
                 if clause.startswith("attribute_exists") != present:
                     raise _ClientError("ConditionalCheckFailedException")
             item = self.items.setdefault(key, {})
-            parts = UpdateExpression.split(" REMOVE ")
-            if parts[0].startswith("SET "):
-                name, value = parts[0][len("SET "):].split(" = ")
-                item[name] = values[value]["S"]
-                removes = parts[1:]
-            else:
-                removes = [parts[0][len("REMOVE "):]]
-            for name in removes:
-                item.pop(name, None)
+            parts = re.split(r"\s*\b(SET|ADD|REMOVE)\b\s*", UpdateExpression)
+            for action, body in zip(parts[1::2], parts[2::2]):
+                for term in body.split(","):
+                    term = term.strip()
+                    if action == "SET":
+                        name, value = (x.strip() for x in term.split("="))
+                        item[names.get(name, name)] = _plain(values[value])
+                    elif action == "ADD":
+                        name, value = term.split()
+                        name = names.get(name, name)
+                        item[name] = item.get(name, 0) + _plain(values[value])
+                    else:
+                        item.pop(names.get(term, term), None)
 
     @staticmethod
     def _typed(key, item):
@@ -600,6 +607,23 @@ class TestBoughtCredits(unittest.TestCase):
         with patch("builtins.print"):
             self.assertIsNone(self.quota.reserve(FREE_CHAT, 3))
         self.assertEqual(self.db.total(USAGE), 3)
+
+    def test_interaction_records_a_profile_that_expires_after_90_idle_days(self):
+        self.quota.record_interaction({"id": FREE_CHAT, "type": "private", "username": "alice", "first_name": "Alice"})
+        self.quota.record_interaction({"id": FREE_CHAT, "type": "private", "first_name": "Alice", "last_name": "B"})
+        profile = self.db.items[(f"chat#{FREE_CHAT}", "profile")]
+        # The username was dropped in Telegram, so it's dropped here too
+        expires = int(datetime(2026, 12, 25, 22, 30, tzinfo=timezone.utc).timestamp())
+        self.assertEqual(profile, {"last_seen": "2026-09-26T22:30:00+00:00", "messages": 2,
+                                   "expires_at": expires, "first_name": "Alice", "last_name": "B"})
+
+    def test_interaction_failure_never_raises(self):
+        def down(**kwargs):
+            raise _ClientError("InternalServerError")
+        self.db.update_item = down
+        with patch("builtins.print") as mock_print:
+            self.quota.record_interaction({"id": FREE_CHAT, "type": "group", "title": "Family"})
+        self.assertTrue(any("profile update failed" in str(c) for c in mock_print.call_args_list))
 
     def test_other_transaction_failures_are_raised_not_treated_as_duplicates(self):
         def conflict(**kwargs):

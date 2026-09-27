@@ -10,7 +10,7 @@ import admin
 import lambda_function
 import payments
 import watermarker
-from test_payments import FakeTelegram, SECRET
+from test_payments import FakeTelegram, SECRET, _http
 from test_quota import FakeDynamo, FREE_CHAT, UNLIMITED_CHAT, _ClientError
 
 ADMIN = 900
@@ -90,6 +90,16 @@ class TestReadCommands(AdminTestCase):
             "Next: /users 2"])
         self.assertEqual(second.splitlines()[1:], ["222: 3 / 3 / 0 / 3"])
 
+    def test_users_pages_cover_tied_chats_exactly_once_in_chat_id_order(self):
+        # Same usage, no last_seen: only the chat id can order them, whatever the Scan order
+        for chat in (505, 303, 404):
+            self.db.items[(f"chat#{chat}", "profile")] = {"messages": 1}
+        with patch.object(admin, "PAGE_SIZE", 2):
+            pages = [self._reply("/users"), self._reply("/users 2")]
+        listed = [line.split(":")[0] for page in pages for line in page.splitlines()[1:]
+                  if not line.startswith("Next")]
+        self.assertEqual(listed, ["111", "303", "404", "505"])
+
     def test_users_includes_a_chat_with_only_free_usage(self):
         # Its history row missing, e.g. because that best-effort write failed
         self.db.items[("chat#333", "usage#2026-09")] = {"images": 4, "expires_at": 0}
@@ -121,6 +131,41 @@ class TestReadCommands(AdminTestCase):
         for command in ["/admin", "/users", "/usage 111", "/charges 111", "/limits", "/stats", "/refund ch1"]:
             self._reply(command)
         self.assertEqual(self.db.items, before)
+
+
+class TestProfiles(AdminTestCase):
+    """#45: a chat that only ever talks to the bot still shows up, with a name."""
+
+    def _send(self, chat, text="/help"):
+        update = {"update_id": 9, "message": {"chat": chat, "from": {"id": chat["id"]}, "text": text}}
+        lambda_function.handler(_http(update), MagicMock(invoked_function_arn="arn"))
+
+    def test_command_only_chat_appears_in_users_with_its_name(self):
+        self._send({"id": 444, "type": "private", "username": "tester", "first_name": "Tess"})
+        self._send({"id": 444, "type": "private", "username": "tester", "first_name": "Tess"}, "/balance")
+        self._send({"id": -100777, "type": "group", "title": "Photo club"})
+        users = self._reply("/users")
+        line = next(l for l in users.splitlines() if l.startswith("444"))
+        self.assertTrue(line.startswith("444 (@tester): 0 / 0 / 0 / 0, last seen "), line)
+        self.assertIn("-100777 (Photo club): 0 / 0 / 0 / 0, last seen", users)
+        usage = self._reply("/usage 444")
+        self.assertIn("Chat 444 (@tester)", usage)
+        self.assertIn(", 2 messages", usage)
+
+    def test_name_falls_back_to_first_and_last_name(self):
+        self._send({"id": 555, "type": "private", "first_name": "Ana", "last_name": "Diaz"})
+        self.assertIn("555 (Ana Diaz)", self._reply("/users"))
+
+    def test_active_chats_are_counted_in_stats(self):
+        self._send({"id": 444, "type": "private", "username": "tester"})
+        self._send({"id": 555, "type": "private", "first_name": "Ana"})
+        self.assertIn("; 2 chats used the bot", self._reply("/stats"))
+
+    def test_every_admin_command_is_logged(self):
+        with patch("builtins.print") as mock_print:
+            self._reply("/usage 111")
+        self.assertTrue(any("ADMIN COMMAND admin=900 command=/usage args='111'" in str(c)
+                            for c in mock_print.call_args_list))
 
 
 class TestGrant(AdminTestCase):

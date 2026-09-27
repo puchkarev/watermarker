@@ -167,6 +167,14 @@ def receive(event, context):
                                            f"This bot is private. Your chat id is {chat_id}.")
             return _response(200)
 
+    # Every chat the bot serves is recorded for /users - only past the allowlist, so a chat
+    # the bot refuses never has its name stored
+    chat = (update.get("message") or {}).get("chat")
+    if chat and chat.get("id") is not None:
+        quota = _quota()
+        if quota is not None:
+            quota.record_interaction(chat)
+
     # Refuse here, before a 2 GB worker starts, when there's no allowance left at all.
     # The worker makes the authoritative reservation once it knows how many images there are.
     if _is_image_job(update):

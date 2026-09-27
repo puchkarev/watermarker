@@ -126,6 +126,7 @@ What *is* stored:
 | A watermark image you set with `/source` | Private cloud storage | Until you replace it |
 | Your free-usage count and credit balance | Database, keyed by chat id | Free-usage counts expire automatically; credits persist |
 | How many images your chat processed each month | Database, keyed by chat id | Kept as a usage history |
+| Your chat's Telegram username and display name (or a group's title), when it last used the bot, and how many messages it has sent | Database, keyed by chat id | Deleted automatically 90 days after your last message; until then the names are refreshed from Telegram on every message, and removed if you remove them there. Only recorded for chats the bot serves |
 | Operational logs, including your chat id | Cloud logs | **14 days**, then deleted automatically |
 | Payment records (Telegram's charge id, amount, pack, the paying user's id) | Database | Kept as a record of purchase |
 

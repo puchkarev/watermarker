@@ -212,6 +212,12 @@ class TestCommands(PaymentTestCase):
         self.assertTrue(any("PAYMENTS BROKEN" in str(c) for c in mock_print.call_args_list))
         self.assertIn("temporarily unavailable", self.telegram.texts()[0])
 
+    def test_balance_shows_the_chat_id_even_without_quotas(self):
+        # /paysupport sends people to /balance for their chat id
+        self.quota = None
+        self.assertTrue(self._run("/balance"))
+        self.assertIn(str(FREE_CHAT), self.telegram.texts()[0])
+
     def test_unlimited_chat_has_nothing_to_buy(self):
         self._run("/buy", chat=UNLIMITED_CHAT)
         self.assertNotIn("sendInvoice", self.telegram.methods())
@@ -223,6 +229,9 @@ class TestCommands(PaymentTestCase):
         text = self.telegram.texts()[0]
         self.assertIn("Free images left this month: 6 of 10", text)
         self.assertIn("Bought images: 100.", text)
+        self.assertIn(f"Your chat id: {FREE_CHAT}", text)
+        self._run("/balance", chat=UNLIMITED_CHAT)
+        self.assertIn(f"Your chat id: {UNLIMITED_CHAT}", self.telegram.texts()[1])
 
     def test_usecredits_records_consent_for_today(self):
         self._run("/usecredits")
@@ -239,6 +248,7 @@ class TestCommands(PaymentTestCase):
         self.assertIn("All purchases are final", terms)
         self.assertIn(payments.TERMS_URL, terms)
         self.assertIn(payments.SUPPORT_EMAIL, support)
+        self.assertIn("Include your chat id (send /balance to see it)", support)
 
     def test_other_text_is_left_to_the_bot(self):
         self.assertFalse(self._run("/size 0.5"))
