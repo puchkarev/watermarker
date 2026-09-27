@@ -151,6 +151,16 @@ class TestLambdaFunction(unittest.TestCase):
             lambda_function.handler(_http_event(_text_update("/help", chat_id=222)), self.context)
         self.lambda_client.invoke.assert_called_once()
 
+    @patch("watermarker.tele.send_telegram")
+    def test_receive_records_only_chats_past_the_allowlist(self, mock_send):
+        quota = MagicMock()
+        with patch.object(lambda_function, "_quota", return_value=quota), \
+                patch.dict(os.environ, {"ALLOWED_CHAT_IDS": "111"}):
+            lambda_function.handler(_http_event(_text_update("/help", chat_id=999)), self.context)
+            quota.record_interaction.assert_not_called()
+            lambda_function.handler(_http_event(_text_update("/help", chat_id=111)), self.context)
+        quota.record_interaction.assert_called_once_with({"id": 111})
+
     # --- Worker ---
 
     @patch("watermarker.handle_update")

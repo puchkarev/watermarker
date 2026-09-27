@@ -90,6 +90,16 @@ class TestReadCommands(AdminTestCase):
             "Next: /users 2"])
         self.assertEqual(second.splitlines()[1:], ["222: 3 / 3 / 0 / 3"])
 
+    def test_users_pages_cover_tied_chats_exactly_once_in_chat_id_order(self):
+        # Same usage, no last_seen: only the chat id can order them, whatever the Scan order
+        for chat in (505, 303, 404):
+            self.db.items[(f"chat#{chat}", "profile")] = {"messages": 1}
+        with patch.object(admin, "PAGE_SIZE", 2):
+            pages = [self._reply("/users"), self._reply("/users 2")]
+        listed = [line.split(":")[0] for page in pages for line in page.splitlines()[1:]
+                  if not line.startswith("Next")]
+        self.assertEqual(listed, ["111", "303", "404", "505"])
+
     def test_users_includes_a_chat_with_only_free_usage(self):
         # Its history row missing, e.g. because that best-effort write failed
         self.db.items[("chat#333", "usage#2026-09")] = {"images": 4, "expires_at": 0}

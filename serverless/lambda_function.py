@@ -136,13 +136,6 @@ def receive(event, context):
         print("Ignoring update with an unparseable body")
         return _response(200)
 
-    # Every chat that sends anything is recorded (/users), whatever the update turns out to be
-    chat = (update.get("message") or {}).get("chat")
-    if chat and chat.get("id") is not None:
-        quota = _quota()
-        if quota is not None:
-            quota.record_interaction(chat)
-
     # Payments are handled here rather than in the worker. A pre-checkout query must be
     # answered within 10 seconds or Telegram cancels the payment, and a completed payment
     # must be credited before we answer: a 500 makes Telegram deliver it again, which is
@@ -173,6 +166,14 @@ def receive(event, context):
             watermarker.tele.send_telegram(os.environ["BOT_TOKEN"], str(chat_id),
                                            f"This bot is private. Your chat id is {chat_id}.")
             return _response(200)
+
+    # Every chat the bot serves is recorded for /users - only past the allowlist, so a chat
+    # the bot refuses never has its name stored
+    chat = (update.get("message") or {}).get("chat")
+    if chat and chat.get("id") is not None:
+        quota = _quota()
+        if quota is not None:
+            quota.record_interaction(chat)
 
     # Refuse here, before a 2 GB worker starts, when there's no allowance left at all.
     # The worker makes the authoritative reservation once it knows how many images there are.

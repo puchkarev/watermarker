@@ -608,13 +608,14 @@ class TestBoughtCredits(unittest.TestCase):
             self.assertIsNone(self.quota.reserve(FREE_CHAT, 3))
         self.assertEqual(self.db.total(USAGE), 3)
 
-    def test_interaction_records_a_profile_that_never_expires(self):
+    def test_interaction_records_a_profile_that_expires_after_90_idle_days(self):
         self.quota.record_interaction({"id": FREE_CHAT, "type": "private", "username": "alice", "first_name": "Alice"})
         self.quota.record_interaction({"id": FREE_CHAT, "type": "private", "first_name": "Alice", "last_name": "B"})
         profile = self.db.items[(f"chat#{FREE_CHAT}", "profile")]
         # The username was dropped in Telegram, so it's dropped here too
+        expires = int(datetime(2026, 12, 25, 22, 30, tzinfo=timezone.utc).timestamp())
         self.assertEqual(profile, {"last_seen": "2026-09-26T22:30:00+00:00", "messages": 2,
-                                   "first_name": "Alice", "last_name": "B"})
+                                   "expires_at": expires, "first_name": "Alice", "last_name": "B"})
 
     def test_interaction_failure_never_raises(self):
         def down(**kwargs):

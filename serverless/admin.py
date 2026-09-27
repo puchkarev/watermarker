@@ -9,9 +9,10 @@ For anyone else these commands behave exactly like any unknown command: the bot
 stays silent and nothing is logged that names them. The Function URL is public,
 and a "not authorised" reply would confirm the commands exist.
 
-The two commands that change anything, /grant and /refund, write an "ADMIN AUDIT"
-line to the logs with who, what, which chat or charge, and the before and after.
-They are the only commands in the system that move credits or money.
+Every admin command, read-only or not, writes an "ADMIN COMMAND" line to the logs
+with the admin's chat id and the arguments. The two that change anything, /grant and
+/refund, also write an "ADMIN AUDIT" line with what changed: which chat or charge, and
+the before and after. They are the only commands in the system that move credits or money.
 """
 import payments
 
@@ -21,7 +22,8 @@ MAX_GRANT = 100000
 
 HELP_TEXT = (
     "Admin commands\n"
-    "/users [page] - Chats with any usage or balance, most active this month first.\n"
+    "/users [page] - Every chat that has used the bot, with its @username or name and "
+    "when it was last seen. Most active this month first.\n"
     "/usage <chat id> - One chat: this month, balance, lifetime total, recent purchases.\n"
     "/charges <chat id> [page] - A chat's purchases, with charge ids for /refund.\n"
     "/limits - The configured limits and today's free usage.\n"
@@ -153,9 +155,11 @@ def _chats(quota):
 
 def _users(bot_token, chat_id, args, quota):
     page = _page_arg(args, 0)
-    # Most images this month first, then lifetime; chats that never processed an image
-    # (commands only) by when they were last seen
-    chats = sorted(_chats(quota).items(), key=lambda kv: kv[1]["profile"].get("last_seen") or "", reverse=True)
+    # Most images this month first, then lifetime, then most recently seen, then chat id:
+    # a total order, since each page is its own Scan and must slice the same list.
+    # Stable sorts, applied from the last key to the first.
+    chats = sorted(_chats(quota).items(), key=lambda kv: kv[0])
+    chats = sorted(chats, key=lambda kv: kv[1]["profile"].get("last_seen") or "", reverse=True)
     chats = sorted(chats, key=lambda kv: (-kv[1]["month"], -kv[1]["lifetime"]))
     if not chats:
         return "No chats have used the bot yet."

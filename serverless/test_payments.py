@@ -212,6 +212,12 @@ class TestCommands(PaymentTestCase):
         self.assertTrue(any("PAYMENTS BROKEN" in str(c) for c in mock_print.call_args_list))
         self.assertIn("temporarily unavailable", self.telegram.texts()[0])
 
+    def test_balance_shows_the_chat_id_even_without_quotas(self):
+        # /paysupport sends people to /balance for their chat id
+        self.quota = None
+        self.assertTrue(self._run("/balance"))
+        self.assertIn(str(FREE_CHAT), self.telegram.texts()[0])
+
     def test_unlimited_chat_has_nothing_to_buy(self):
         self._run("/buy", chat=UNLIMITED_CHAT)
         self.assertNotIn("sendInvoice", self.telegram.methods())

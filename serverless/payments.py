@@ -227,8 +227,9 @@ def handle_command(bot_token, chat_id, text, quota):
     elif command == "/paysupport":
         _send(bot_token, chat_id, PAYSUPPORT_TEXT)
     elif command == "/balance":
-        _send(bot_token, chat_id, "Image limits aren't enabled on this bot." if quota is None
-              else _balance_text(quota, chat_id))
+        # /paysupport sends people here for their chat id, so it's shown with or without quotas
+        _send(bot_token, chat_id, f"Image limits aren't enabled on this bot.\nYour chat id: {chat_id}."
+              if quota is None else _balance_text(quota, chat_id))
     elif command == "/buy":
         _buy(bot_token, chat_id, quota)
     elif command == "/usecredits":

@@ -235,7 +235,7 @@ chats: every member of an admin group chat would be an admin.
 
 | Command | What it does |
 |---|---|
-| `/users [page]` | Every chat that has used the bot, with its @username or name and when it was last seen; most active this month first |
+| `/users [page]` | Every chat that has used the bot, with its @username or name and when it was last seen (a chat's profile is deleted 90 days after its last message); most active this month first |
 | `/usage <chat id>` | One chat: this month, free used, bought images left, lifetime total, recent purchases |
 | `/charges <chat id> [page]` | A chat's purchases, with the charge ids `/refund` needs |
 | `/limits` | The configured limits and how much of today's free cap is used |

@@ -52,8 +52,9 @@ Items (pk / sk):
                                       Telegram username / name / group title
 Usage rows carry expires_at (epoch seconds) so DynamoDB TTL deletes them once
 their period and the one after it are over; a consent row, once its day is over.
-Balance, charge, images, grant and profile rows have no expires_at at all, so TTL
-never touches them. Keying by owner then record type keeps everything about one chat in
+A profile row expires PROFILE_TTL_DAYS after the chat was last seen, refreshed on
+every message, so strangers who never come back age out. Balance, charge, images and
+grant rows have no expires_at at all, so TTL never touches them. Keying by owner then record type keeps everything about one chat in
 one partition, readable with a single Query.
 """
 from datetime import datetime, timedelta, timezone
@@ -473,14 +474,19 @@ class ImageQuota:
     # --- who uses the bot ---
 
     PROFILE_FIELDS = ("username", "first_name", "last_name", "title")
+    PROFILE_TTL_DAYS = 90
 
     def record_interaction(self, chat):
         """Note that a chat used the bot: bump its message count, stamp last_seen and
         refresh its display fields from Telegram's Chat object (username, names, group
         title), removing any it no longer has - they change, and a username can be
-        reassigned. Best effort: never raises, so it can't affect the update itself."""
-        sets, removes = ["last_seen = :now"], []
-        names, values = {}, {":now": {"S": self.now().isoformat()}, ":one": {"N": "1"}}
+        reassigned. The row expires PROFILE_TTL_DAYS after this, so a chat that never comes
+        back doesn't stay in the table for good. Best effort: never raises, so it can't
+        affect the update itself."""
+        now = self.now()
+        expires = int((now + timedelta(days=self.PROFILE_TTL_DAYS)).timestamp())
+        sets, removes = ["last_seen = :now", "expires_at = :expires"], []
+        names, values = {}, {":now": {"S": now.isoformat()}, ":one": {"N": "1"}, ":expires": {"N": str(expires)}}
         for field in self.PROFILE_FIELDS:
             names[f"#{field}"] = field  # aliased: DynamoDB reserves some plain words
             if chat.get(field):
