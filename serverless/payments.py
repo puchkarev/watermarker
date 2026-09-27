@@ -34,6 +34,7 @@ PAYLOAD_PREFIX = "images-v1:"
 PAYMENT_COMMANDS = {
     "balance": "Show your free images left this month and bought images",
     "buy": "Buy more images with Telegram Stars",
+    "usecredits": "Use bought images today if the bot's free images run out",
     "terms": "Terms and conditions",
     "paysupport": "Help with payments and billing",
 }

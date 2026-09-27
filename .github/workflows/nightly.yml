@@ -34,6 +34,7 @@ jobs:
         python serverless/test_lambda_function.py
         python serverless/test_quota.py
         python serverless/test_payments.py
+        python serverless/test_admin.py
 
     - name: Check for changes and Create Release
       env:

@@ -222,12 +222,43 @@ If you deployed before payments existed, run `./serverless/deploy.sh deploy`
 Telegram would cancel every checkout. `/buy` checks for that and says purchases
 are unavailable rather than taking anyone to a checkout that can't finish.
 
+### 8. Admin commands
+
+Chats listed with `--admin-chat-ids` get a set of admin commands; send `/admin`
+in one of them to list them. This is a separate list from `--unlimited-chat-ids`,
+so adding a friend to the unlimited list never makes them an admin. Use private
+chats: every member of an admin group chat would be an admin.
+
+```bash
+./serverless/deploy.sh deploy --admin-chat-ids 123456789
+```
+
+| Command | What it does |
+|---|---|
+| `/users [page]` | Chats with any usage or balance, most active this month first |
+| `/usage <chat id>` | One chat: this month, free used, bought images left, lifetime total, recent purchases |
+| `/charges <chat id>` | A chat's purchases, with the charge ids `/refund` needs |
+| `/limits` | The configured limits and how much of today's free cap is used |
+| `/stats` | Totals: images this month, active chats, images sold and Stars taken |
+| `/grant <chat id> <images> [reason]` | Add images to a chat's balance. No money moves; prefer this for goodwill or to fix a billing mistake |
+| `/refund <charge id>` | Show what refunding a purchase would do; `/refund <charge id> confirm` does it |
+
+- A refund sends the Stars back to the person who paid, takes the pack's images
+  back (never below zero; the reply says if some were already used), and can only
+  happen once per purchase. If Telegram refuses, nothing changes.
+- `/grant` and `/refund` each write an `ADMIN AUDIT` line to the logs:
+  `./serverless/deploy.sh logs | grep "ADMIN AUDIT"`.
+- For anyone else these commands behave like any unknown command: no reply, and
+  nothing in the logs.
+- Refunds aren't offered to users (all purchases are final, see
+  [TERMS.md](../TERMS.md)); `/refund` exists to put right a billing mistake.
+
 ## Day-to-day commands
 
 | Command | What it does |
 |---|---|
 | `./serverless/deploy.sh deploy` | Rebuild and redeploy (after `git pull`). Keeps the token, secret, limits, unlimited chats and all chat settings. |
-| `./serverless/deploy.sh status` | Show the webhook URL, bucket, image limits, unlimited chats and Telegram's webhook status, including the last error Telegram saw |
+| `./serverless/deploy.sh status` | Show the webhook URL, bucket, image limits, unlimited and admin chats and Telegram's webhook status, including the last error Telegram saw |
 | `./serverless/deploy.sh logs` | Follow the function's logs live (Ctrl+C to stop) |
 | `./serverless/deploy.sh detach` | Remove the webhook, for example to hand the token back to a server |
 | `./serverless/deploy.sh attach` | Set the webhook again |
@@ -276,5 +307,6 @@ and Lambda keeps them in S3.
 | `deploy.sh` | Build, deploy and management script |
 | `requirements.txt` | Python packages bundled into the Lambda |
 | `quota.py` | Free allowance, system cap, bought credits and purchase records in DynamoDB |
-| `payments.py` | Telegram Stars: invoices, pre-checkout, crediting, `/buy`, `/balance`, `/terms`, `/paysupport` |
-| `test_lambda_function.py`, `test_quota.py`, `test_payments.py` | Tests, run each with `python serverless/<file>` |
+| `payments.py` | Telegram Stars: invoices, pre-checkout, crediting, `/buy`, `/balance`, `/usecredits`, `/terms`, `/paysupport` |
+| `admin.py` | Admin commands for the chats in `ADMIN_CHAT_IDS` |
+| `test_lambda_function.py`, `test_quota.py`, `test_payments.py`, `test_admin.py` | Tests, run each with `python serverless/<file>` |

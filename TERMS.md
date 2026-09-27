@@ -2,7 +2,7 @@
 
 **Service:** the Watermarker bot, [@add_sun_watermark_bot](https://t.me/add_sun_watermark_bot) on Telegram
 **Source code:** <https://github.com/puchkarev/watermarker>
-**Last updated:** 2026-09-26
+**Last updated:** 2026-09-27
 
 By sending the bot an image, a file or a payment, you agree to these terms. If you
 do not agree, do not use the bot.
@@ -124,9 +124,13 @@ What *is* stored:
 |---|---|---|
 | Your chat's settings (position, size, angle, etc.) | Private cloud storage | Until you change or reset them |
 | A watermark image you set with `/source` | Private cloud storage | Until you replace it |
-| Your free-usage count and credit balance | Database, keyed by chat id | Usage counts expire automatically; credits persist |
+| Your free-usage count and credit balance | Database, keyed by chat id | Free-usage counts expire automatically; credits persist |
+| How many images your chat processed each month | Database, keyed by chat id | Kept as a usage history |
 | Operational logs, including your chat id | Cloud logs | **14 days**, then deleted automatically |
-| Payment records (Telegram's charge id, amount, pack) | Database | Kept as a record of purchase |
+| Payment records (Telegram's charge id, amount, pack, the paying user's id) | Database | Kept as a record of purchase |
+
+The bot's operator can view these usage and purchase records, for support and
+administration.
 
 The bot runs on Amazon Web Services in the US East region, so data is processed
 there. To have your stored settings, watermark and balance deleted, ask via
