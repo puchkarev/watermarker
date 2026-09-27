@@ -17,7 +17,10 @@ ADMIN = 900
 BUYER = 111
 PAYER = 777
 COMMANDS = ["/admin", "/users", "/users 2", "/usage 111", "/charges 111", "/limits", "/stats",
-            "/grant 111 50 goodwill", "/refund ch1", "/refund ch1 confirm"]
+            "/grant 111 50 goodwill", "/refund ch1", "/refund ch1 confirm",
+            "/admins", "/promote 111 confirm", "/demote 900 confirm", "/unlimited", "/giveunlimited 111 confirm",
+            "/takeunlimited 5173725149 confirm"]
+PROMOTED = 555
 
 
 def _missing(bucket, key, path):
@@ -377,6 +380,128 @@ class TestReplies(AdminTestCase):
         self.assertTrue(any("admin reply to 900 failed" in str(c) for c in mock_print.call_args_list))
 
 
+class TestPrivileges(AdminTestCase):
+
+    def _audits(self, text):
+        with patch("builtins.print") as log:
+            reply = self._reply(text)
+        return reply, [str(c) for c in log.call_args_list if "ADMIN AUDIT" in str(c)]
+
+    def test_promote_previews_who_it_is_then_needs_confirm(self):
+        self.quota.record_interaction({"id": PROMOTED, "type": "private", "username": "victor"})
+        preview, audits = self._audits(f"/promote {PROMOTED}")
+        self.assertIn(f"This makes {PROMOTED} (@victor) an admin: it can read every chat's usage", preview)
+        self.assertIn(f"To go ahead: /promote {PROMOTED} confirm", preview)
+        self.assertEqual(audits, [])
+        self.assertFalse(lambda_function._quota().is_admin(PROMOTED))
+        # An id the bot has never seen is flagged: likely a typo
+        self.assertIn("556 (not seen by the bot recently - check the id)", self._reply("/promote 556"))
+
+    def test_promote_is_audited_and_a_repeat_or_yourself_is_a_no_op(self):
+        reply, audits = self._audits(f"/promote {PROMOTED} confirm")
+        self.assertIn(f"Chat {PROMOTED} is now an admin", reply)
+        self.assertEqual(len(audits), 1)
+        self.assertIn(f"action=promote chat={PROMOTED} admin_before=False admin_after=True", audits[0])
+        for again in (f"/promote {PROMOTED}", f"/promote {PROMOTED} confirm", f"/promote {ADMIN} confirm"):
+            reply, audits = self._audits(again)
+            self.assertIn("is already an admin. Nothing changed.", reply)
+            self.assertEqual(audits, [])
+
+    def test_promote_refuses_groups(self):
+        reply, audits = self._audits("/promote -100123 confirm")
+        self.assertIn("is a group", reply)
+        self.assertEqual(audits, [])
+        self.assertFalse(lambda_function._quota().is_admin(-100123))
+
+    def test_granting_warns_when_the_deprecated_allowlist_would_refuse_the_chat(self):
+        with patch.dict(os.environ, {"ALLOWED_CHAT_IDS": f"{ADMIN}"}):
+            for command in (f"/promote {PROMOTED}", f"/promote {PROMOTED} confirm",
+                            "/giveunlimited 222", "/giveunlimited 222 confirm"):
+                self.assertIn("ALLOWED_CHAT_IDS is set and doesn't include it", self._reply(command), command)
+        with patch.dict(os.environ, {"ALLOWED_CHAT_IDS": f"{ADMIN},223"}):
+            self.assertNotIn("ALLOWED_CHAT_IDS", self._reply("/giveunlimited 223"))
+
+    def test_root_admins_cannot_be_demoted_even_by_themselves(self):
+        reply, audits = self._audits(f"/demote {ADMIN} confirm")
+        self.assertEqual(reply, f"{ADMIN} is a root admin from the deployment config and can't be demoted here.")
+        self.assertEqual(audits, [])
+        self.assertTrue(lambda_function._quota().is_admin(ADMIN))
+
+    def test_demoting_a_root_admin_removes_a_grant_underneath_so_leaving_the_config_revokes(self):
+        self._reply(f"/promote {PROMOTED} confirm")
+        with patch.dict(os.environ, {"ADMIN_CHAT_IDS": f"{ADMIN},{PROMOTED}"}):
+            self.quota = lambda_function._quota()
+            self.assertIn(f"- {PROMOTED}: root, from the deployment config, and added by {ADMIN}",
+                          self._reply("/admins"))
+            reply, audits = self._audits(f"/demote {PROMOTED}")
+            self.assertIn("can't be demoted here. It had also been made an admin from chat; that was removed", reply)
+            self.assertIn(f"action=demote chat={PROMOTED} root=True row_removed=True", audits[0])
+            self.assertTrue(lambda_function._quota().is_admin(PROMOTED))
+        self.assertFalse(lambda_function._quota().is_admin(PROMOTED))
+
+    def test_demote_needs_confirm_and_warns_about_the_last_promoted_admin_and_yourself(self):
+        self._reply(f"/promote {PROMOTED} confirm")
+        preview = self._reply(f"/demote {PROMOTED}")
+        self.assertIn(f"To go ahead: /demote {PROMOTED} confirm", preview)
+        self.assertIn("last admin added from chat", preview)
+        self.assertTrue(lambda_function._quota().is_admin(PROMOTED))
+        # From the promoted admin's own chat, about itself
+        _, preview = self._run(f"/demote {PROMOTED}", chat=PROMOTED)
+        self.assertIn("you will lose admin access yourself", preview)
+        reply, audits = self._audits(f"/demote {PROMOTED} confirm")
+        self.assertEqual(reply, f"Chat {PROMOTED} is no longer an admin.")
+        self.assertIn(f"action=demote chat={PROMOTED} admin_before=True admin_after=False", audits[0])
+        self.assertFalse(lambda_function._quota().is_admin(PROMOTED))
+        self.assertIn("isn't an admin", self._reply(f"/demote {PROMOTED} confirm"))
+
+    def test_lists_mark_the_root_entries(self):
+        self._reply(f"/promote {PROMOTED} confirm")
+        self._reply("/giveunlimited 222 confirm")
+        admins = self._reply("/admins").splitlines()
+        self.assertEqual(admins[0], "Admins (2):")
+        self.assertTrue(admins[1].startswith(f"- {PROMOTED}: added by {ADMIN} on 20"), admins)
+        self.assertIn(f"- {ADMIN}: root, from the deployment config", admins)
+        unlimited = self._reply("/unlimited").splitlines()
+        self.assertIn(f"- {UNLIMITED_CHAT}: root, from the deployment config", unlimited)
+        self.assertTrue(any(line.startswith(f"- 222: added by {ADMIN} on 20") for line in unlimited), unlimited)
+
+    def test_unlimited_can_be_given_and_taken_and_the_chat_pays_again_at_once(self):
+        # 222 has bought a pack and used none of its free images
+        self.quota.credit(222, 222, "ch2", "small", 100, 200)
+        self.assertIn("To go ahead: /giveunlimited 222 confirm", self._reply("/giveunlimited 222"))
+        self.assertFalse(lambda_function._quota().is_unlimited(222))
+        reply, audits = self._audits("/giveunlimited 222 confirm")
+        self.assertIn("is now unlimited", reply)
+        self.assertIn("action=giveunlimited chat=222 unlimited_before=False unlimited_after=True", audits[0])
+        self.assertIn("already unlimited", self._reply("/giveunlimited 222 confirm"))
+
+        job = lambda_function._quota()
+        self.assertIsNone(job.reserve(222, 30))
+        self.assertEqual((job.status(222)["free_left"], job.balance(222)), (10, 100))
+
+        preview = self._reply("/takeunlimited 222")
+        self.assertIn("10 of 10 left this month), then its bought images (100)", preview)
+        self.assertTrue(lambda_function._quota().is_unlimited(222))
+        reply, audits = self._audits("/takeunlimited 222 confirm")
+        self.assertIn("is no longer unlimited", reply)
+        self.assertIn("action=takeunlimited chat=222 unlimited_before=True unlimited_after=False", audits[0])
+
+        # The very next job: free images first, then credits
+        job = lambda_function._quota()
+        self.assertIsNone(job.reserve(222, 15))
+        self.assertEqual((job.status(222)["free_left"], job.balance(222)), (0, 95))
+
+    def test_root_unlimited_chats_cannot_be_limited(self):
+        reply, audits = self._audits(f"/takeunlimited {UNLIMITED_CHAT} confirm")
+        self.assertEqual(reply, f"{UNLIMITED_CHAT} is unlimited from the deployment config and can't be changed here.")
+        self.assertEqual(audits, [])
+        self.assertIn("isn't unlimited", self._reply(f"/takeunlimited {BUYER}"))
+
+    def test_privilege_commands_need_a_chat_id(self):
+        for command in ("/promote", "/demote x", "/giveunlimited", "/takeunlimited"):
+            self.assertTrue(self._reply(command).startswith("Usage: "), command)
+
+
 class TestGating(AdminTestCase):
     """A non-admin must not be able to tell the admin commands exist."""
 
@@ -415,6 +540,29 @@ class TestGating(AdminTestCase):
                 self.assertEqual(self._observe(chat, command), unknown, (chat, command))
         self.assertEqual(self.quota.balance(BUYER), 95)
         self.assertIsNone(self.quota.charge("ch1").get("refunded"))
+        fresh = lambda_function._quota()
+        self.assertFalse(fresh.is_admin(BUYER) or fresh.is_unlimited(BUYER))
+        self.assertTrue(fresh.is_admin(ADMIN) and fresh.is_unlimited(UNLIMITED_CHAT))
+
+    def test_a_promoted_admin_can_use_admin_commands_until_demoted(self):
+        self.assertEqual(self._observe(PROMOTED, "/stats")[0], [])
+        self._observe(ADMIN, f"/promote {PROMOTED} confirm")
+        sent, _, _ = self._observe(PROMOTED, "/stats")
+        self.assertIn("This month:", sent[0][1]["text"])
+        # A promoted admin can promote and demote others, but not the root
+        self._observe(PROMOTED, "/promote 556 confirm")
+        sent, _, _ = self._observe(PROMOTED, f"/demote {ADMIN} confirm")
+        self.assertIn("root admin", sent[0][1]["text"])
+        self._observe(ADMIN, f"/demote {PROMOTED}")  # a preview changes nothing
+        self.assertNotEqual(self._observe(PROMOTED, "/stats")[0], [])
+        self._observe(ADMIN, f"/demote {PROMOTED} confirm")
+        self.assertEqual(self._observe(PROMOTED, "/stats"), ([], [], []))
+        self.assertEqual(self._observe(ADMIN, "/admin")[0][0][0], "sendMessage")
+
+    def test_privilege_commands_stay_out_of_the_public_menu(self):
+        public = set(watermarker.BOT_COMMANDS) | set(payments.PAYMENT_COMMANDS)
+        for command in admin.COMMANDS:
+            self.assertNotIn(command.lstrip("/"), public)
 
     def test_admin_chat_gets_answers_through_the_worker(self):
         sent, _, _ = self._observe(ADMIN, "/admin")

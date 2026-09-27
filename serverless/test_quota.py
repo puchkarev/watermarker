@@ -115,7 +115,8 @@ class FakeDynamo:
             result["LastEvaluatedKey"] = {"pk": {"S": last[0]}, "sk": {"S": last[1]}}
         return result
 
-    def query(self, TableName, KeyConditionExpression, ExpressionAttributeValues, ExclusiveStartKey=None):
+    def query(self, TableName, KeyConditionExpression, ExpressionAttributeValues, ExclusiveStartKey=None,
+              ConsistentRead=False):
         assert KeyConditionExpression == "pk = :pk"
         pk = ExpressionAttributeValues[":pk"]["S"]
         with self.lock:
@@ -152,6 +153,15 @@ class FakeDynamo:
     def put_item(self, TableName, Item):
         with self.lock:
             self.items[self._key(Item)] = {k: _plain(v) for k, v in Item.items() if k not in ("pk", "sk")}
+
+    def delete_item(self, TableName, Key, ConditionExpression=None):
+        with self.lock:
+            key = self._key(Key)
+            if ConditionExpression is not None:
+                assert ConditionExpression == "attribute_exists(pk)", ConditionExpression
+                if key not in self.items:
+                    raise _ClientError("ConditionalCheckFailedException")
+            self.items.pop(key, None)
 
     def get_item(self, TableName, Key):
         item = self.items.get(self._key(Key))
@@ -624,6 +634,66 @@ class TestBoughtCredits(unittest.TestCase):
         with patch("builtins.print") as mock_print:
             self.quota.record_interaction({"id": FREE_CHAT, "type": "group", "title": "Family"})
         self.assertTrue(any("profile update failed" in str(c) for c in mock_print.call_args_list))
+
+    def test_config_rows_add_to_the_root_entries(self):
+        quota = ImageQuota(self.db, "table", 10, 5000, unlimited_chat_ids={"1"}, admin_chat_ids={"9"},
+                           now=Clock(datetime(2026, 9, 26, 22, 30, tzinfo=timezone.utc)))
+        self.assertTrue(quota.add_member("admin", 8, 9))
+        self.assertFalse(quota.add_member("admin", 8, 9))  # already there
+        self.assertFalse(quota.add_member("admin", 9, 9))  # root already
+        self.assertTrue(quota.add_member("unlimited", 2, 9))
+        self.assertEqual(quota.members("admin"), {
+            "9": {"root": True, "row": None},
+            "8": {"root": False, "row": {"added_by": "9", "ts": "2026-09-26T22:30:00+00:00"}}})
+        self.assertEqual(quota.unlimited, {"1", "2"})
+        self.assertTrue(quota.is_admin(8) and quota.is_unlimited(2))
+        self.assertFalse(quota.remove_member("admin", 9))  # no row to remove; root stays
+        self.assertTrue(quota.remove_member("admin", 8))
+        self.assertFalse(quota.remove_member("admin", 8))
+        self.assertFalse(quota.is_admin(8))
+        self.assertTrue(quota.is_admin(9) and quota.is_unlimited(1))
+        # Nothing about config rows expires
+        self.assertNotIn("expires_at", self.db.items[("config", "unlimited#2")])
+
+    def test_a_row_under_a_root_entry_can_be_removed_so_leaving_the_config_revokes(self):
+        def quota(root):
+            return ImageQuota(self.db, "table", 10, 5000, admin_chat_ids=root)
+        self.assertTrue(quota({"9"}).add_member("admin", 555, 9))  # promoted from chat
+        later = quota({"9", "555"})  # then also put in ADMIN_CHAT_IDS
+        self.assertEqual(later.members("admin")["555"]["root"], True)
+        self.assertTrue(later.remove_member("admin", 555))  # the row goes; root keeps it an admin
+        self.assertTrue(later.is_admin(555))
+        self.assertFalse(quota({"9"}).is_admin(555))  # out of ADMIN_CHAT_IDS: really gone
+
+    def test_config_is_read_consistently_and_chat_reads_are_not(self):
+        reads = []
+        original = self.db.query
+        self.db.query = lambda **kwargs: reads.append((kwargs["ExpressionAttributeValues"][":pk"]["S"],
+                                                       kwargs["ConsistentRead"])) or original(**kwargs)
+        self.quota.is_admin(222)
+        self.quota.chat_records(222)
+        self.assertEqual(reads, [("config", True), ("chat#222", False)])
+
+    def test_config_is_read_once_per_instance(self):
+        self.db.items[("config", "unlimited#222")] = {"added_by": "9", "ts": "t"}
+        calls = []
+        original = self.db.query
+        self.db.query = lambda **kwargs: calls.append(1) or original(**kwargs)
+        self.assertTrue(self.quota.is_unlimited(222))
+        self.assertFalse(self.quota.is_unlimited(333))
+        self.assertFalse(self.quota.is_admin(222))
+        self.assertEqual(len(calls), 1)
+
+    def test_admin_check_fails_closed_when_the_config_cannot_be_read(self):
+        quota = ImageQuota(self.db, "table", 10, 5000, admin_chat_ids={"9"})
+        self.db.items[("config", "admin#8")] = {"added_by": "9", "ts": "t"}
+
+        def down(**kwargs):
+            raise _ClientError("InternalServerError")
+        self.db.query = down
+        with patch("builtins.print"):
+            self.assertFalse(quota.is_admin(8))
+        self.assertTrue(quota.is_admin(9))
 
     def test_other_transaction_failures_are_raised_not_treated_as_duplicates(self):
         def conflict(**kwargs):

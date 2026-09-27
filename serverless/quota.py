@@ -50,12 +50,22 @@ Items (pk / sk):
     chat#<id> / grant#<timestamp>     images an admin added (admin.py), with who and why
     chat#<id> / profile               last seen, message count, and the chat's current
                                       Telegram username / name / group title
+    config / admin#<id>               an admin added from chat (/promote), with who and when
+    config / unlimited#<id>           an unlimited chat added from chat (/giveunlimited)
 Usage rows carry expires_at (epoch seconds) so DynamoDB TTL deletes them once
 their period and the one after it are over; a consent row, once its day is over.
 A profile row expires PROFILE_TTL_DAYS after the chat was last seen, refreshed on
 every message, so strangers who never come back age out. Balance, charge, images and
-grant rows have no expires_at at all, so TTL never touches them. Keying by owner then record type keeps everything about one chat in
-one partition, readable with a single Query.
+grant rows have no expires_at at all, so TTL never touches them, and nor do config rows.
+Keying by owner then record type keeps everything about one chat in one partition,
+readable with a single Query.
+
+Admins and unlimited chats: the ADMIN_CHAT_IDS and UNLIMITED_CHAT_IDS deployment
+settings are the root entries, which no chat command can remove, so a mistake or a
+hostile admin can always be undone by the deployment. The config rows add to them.
+Both are read with one Query the first time they're needed, then kept for the rest of
+the invocation, so a change applies from the next message and one job never sees its
+chat's status change halfway.
 """
 from datetime import datetime, timedelta, timezone
 
@@ -103,12 +113,15 @@ def _duration(delta):
 
 
 class ImageQuota:
-    def __init__(self, dynamodb, table, free_monthly, system_daily, unlimited_chat_ids=(), now=_utc_now):
+    def __init__(self, dynamodb, table, free_monthly, system_daily, unlimited_chat_ids=(), admin_chat_ids=(),
+                 now=_utc_now):
         self.db = dynamodb
         self.table = table
         self.free_monthly = int(free_monthly)
         self.system_daily = int(system_daily)
-        self.unlimited = {str(c) for c in unlimited_chat_ids}
+        self.root = {"unlimited": {str(c) for c in unlimited_chat_ids},
+                     "admin": {str(c) for c in admin_chat_ids}}
+        self._config_rows = None
         self.now = now
         # Each chat's last granted reservation: its (day, month), so a release settles those
         # rows (a zip at 23:5x on the 30th of September crosses both boundaries), and how
@@ -174,8 +187,80 @@ class ImageQuota:
                 return False
             raise
 
+    # --- admins and unlimited chats: the deployment's root entries plus config rows ---
+
+    CONFIG_KINDS = ("admin", "unlimited")
+
+    def _config(self):
+        """{(kind, chat id): attributes} for every config row, read once per instance."""
+        if self._config_rows is None:
+            rows = {}
+            # Strongly consistent: a /demote must hold from the very next message
+            for sk, attrs in self._partition("config", consistent=True).items():
+                kind, _, chat = sk.partition("#")
+                if kind in self.CONFIG_KINDS and chat:
+                    rows[(kind, chat)] = attrs
+            self._config_rows = rows
+        return self._config_rows
+
+    def members(self, kind):
+        """{chat id: {"root": bool, "row": its config row or None}}. A root entry can
+        have a row too (added from chat before it was put in the deployment config)."""
+        rows = {chat: attrs for (k, chat), attrs in self._config().items() if k == kind}
+        return {chat: {"root": chat in self.root[kind], "row": rows.get(chat)}
+                for chat in set(rows) | self.root[kind]}
+
+    @property
+    def unlimited(self):
+        return set(self.members("unlimited"))
+
     def is_unlimited(self, chat_id):
-        return str(chat_id) in self.unlimited
+        chat = str(chat_id)
+        return chat in self.root["unlimited"] or ("unlimited", chat) in self._config()
+
+    def is_admin(self, chat_id):
+        """Fails closed: if the config rows can't be read, only the root admins count."""
+        chat = str(chat_id)
+        if chat in self.root["admin"]:
+            return True
+        try:
+            return ("admin", chat) in self._config()
+        except Exception as e:
+            print(f"admin list read failed, only root admins apply: {e}")
+            return False
+
+    def add_member(self, kind, chat_id, added_by):
+        """Add a config row. False, changing nothing, if the chat already has it."""
+        chat = str(chat_id)
+        if chat in self.root[kind]:
+            return False
+        when = self.now().isoformat()
+        try:
+            self.db.update_item(TableName=self.table, Key=self._item_key(("config", f"{kind}#{chat}")),
+                                UpdateExpression="SET added_by = :by, ts = :ts",
+                                ConditionExpression="attribute_not_exists(pk)",
+                                ExpressionAttributeValues={":by": {"S": str(added_by)}, ":ts": {"S": when}})
+        except Exception as e:
+            if _error_code(e) == "ConditionalCheckFailedException":
+                return False
+            raise
+        self._config_rows = None
+        return True
+
+    def remove_member(self, kind, chat_id):
+        """Delete a config row. False if there was none. Always deletes, root entry or not:
+        a row can't grant what the deployment config does, and one left under a root entry
+        would quietly bring the privilege back once the entry leaves the config."""
+        chat = str(chat_id)
+        try:
+            self.db.delete_item(TableName=self.table, Key=self._item_key(("config", f"{kind}#{chat}")),
+                                ConditionExpression="attribute_exists(pk)")
+        except Exception as e:
+            if _error_code(e) == "ConditionalCheckFailedException":
+                return False
+            raise
+        self._config_rows = None
+        return True
 
     @staticmethod
     def _balance_key(chat_id):
@@ -508,10 +593,18 @@ class ImageQuota:
 
     def chat_records(self, chat_id):
         """Every row of one chat, {sk: attributes}: a single Query thanks to the sort key."""
+        return self._partition(f"chat#{chat_id}")
+
+    def profile(self, chat_id):
+        """A chat's profile row (record_interaction), or {}."""
+        item = self.db.get_item(TableName=self.table, Key=self._item_key((f"chat#{chat_id}", "profile"))).get("Item")
+        return _attributes(item) if item else {}
+
+    def _partition(self, pk, consistent=False):
         records, start = {}, None
         while True:
             kwargs = {"TableName": self.table, "KeyConditionExpression": "pk = :pk",
-                      "ExpressionAttributeValues": {":pk": {"S": f"chat#{chat_id}"}}}
+                      "ExpressionAttributeValues": {":pk": {"S": pk}}, "ConsistentRead": consistent}
             if start:
                 kwargs["ExclusiveStartKey"] = start
             page = self.db.query(**kwargs)

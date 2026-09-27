@@ -180,6 +180,10 @@ To make your own chats unlimited:
    ./serverless/deploy.sh deploy --unlimited-chat-ids 123456789,-1001234567890
    ```
 
+Once you're an admin (section 8), `/giveunlimited <chat id>` and
+`/takeunlimited <chat id>` do the same from chat, without a redeploy. Chats listed
+with `--unlimited-chat-ids` are root entries that only a redeploy can change.
+
 Change the limits the same way, e.g. `--free-monthly-images 20 --system-daily-images 2000`.
 `--free-daily-images` was replaced by `--free-monthly-images` when the free
 allowance became monthly; the old flag now stops with an error pointing at the new one.
@@ -242,6 +246,22 @@ chats: every member of an admin group chat would be an admin.
 | `/stats` | Totals: images this month, active chats, images sold and Stars taken |
 | `/grant <chat id> <images> [reason]` | Add images to a chat's balance. No money moves; prefer this for goodwill or to fix a billing mistake |
 | `/refund <charge id>` | Show what refunding a purchase would do; `/refund <charge id> confirm` does it |
+| `/admins` | Who is an admin, marking the root admins from `--admin-chat-ids` |
+| `/promote <chat id>` | Show who that chat is and what admin would let it do; `/promote <chat id> confirm` does it. Groups are refused |
+| `/demote <chat id>` | Show what demoting would do; `/demote <chat id> confirm` does it |
+| `/unlimited` | Chats with no personal limit, marking the root ones from `--unlimited-chat-ids` |
+| `/giveunlimited <chat id>` | Show who that chat is; `/giveunlimited <chat id> confirm` stops counting its images against its allowance and balance |
+| `/takeunlimited <chat id>` | Show what that would do; `/takeunlimited <chat id> confirm` counts them again |
+
+- Every change needs `confirm`, granting included: the preview names the chat, or
+  says the bot hasn't seen that id, which is what catches a mistyped id.
+- The chats in `--admin-chat-ids` and `--unlimited-chat-ids` are root entries: no
+  command can demote or limit them, not even their own. If one of them was also
+  added from chat, `/demote` or `/takeunlimited` removes that, so taking it out of
+  the deployment config later really does take the privilege away. Admins and unlimited chats
+  added from chat are kept in the table alongside them. If a promoted admin
+  misbehaves, or everyone gets demoted by mistake, a root admin (or a redeploy) can
+  always put it right. Changes apply from the chat's next message.
 
 - A refund sends the Stars back to the person who paid, takes the pack's images
   back (never below zero), and can only happen once per purchase. The preview says
@@ -250,7 +270,8 @@ chats: every member of an admin group chat would be an admin.
 - If Telegram refuses, nothing changes. If it gives no clear answer (a timeout, a
   server error), the purchase is marked "refund pending" and nothing else happens;
   confirming again finishes it safely, since Telegram never pays a charge twice.
-- `/grant` and `/refund` each write an `ADMIN AUDIT` line to the logs:
+- `/grant`, `/refund`, `/promote`, `/demote`, `/giveunlimited` and `/takeunlimited`
+  each write an `ADMIN AUDIT` line to the logs, with the before and after:
   `./serverless/deploy.sh logs | grep "ADMIN AUDIT"`.
 - For anyone else these commands behave like any unknown command: no reply, and
   nothing in the logs.
