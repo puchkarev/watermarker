@@ -81,7 +81,7 @@ If the bot is only used occasionally, it can instead run on AWS Lambda. It only 
 
 To deploy from your own machine instead, install the [AWS CLI v2](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html), `python3` with `pip`, `curl` and `zip`, and run `aws configure` first.
 
-**Daily limits:** anyone can use the bot, but each chat gets 10 images a day and the whole bot 5000, so strangers can't run up your AWS bill. Make your own chats unlimited (find your chat id with `./serverless/deploy.sh logs`, looking for `quota chat=<id>`):
+**Image limits:** anyone can use the bot, but each chat gets 10 free images a month and the whole bot 5000 a day, so strangers can't run up your AWS bill. Make your own chats unlimited (find your chat id with `./serverless/deploy.sh logs`, looking for `quota chat=<id>`):
 ```bash
 ./serverless/deploy.sh deploy --unlimited-chat-ids 123456789
 ```

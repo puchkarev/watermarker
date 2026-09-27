@@ -14,8 +14,8 @@
 #
 # Options:
 #   --bot-token TOKEN        Telegram bot token (asked for on first deploy; kept on later deploys)
-#   --unlimited-chat-ids IDS comma-separated chat ids with no personal daily limit
-#   --free-daily-images N    images per UTC day for every other chat (default 10)
+#   --unlimited-chat-ids IDS comma-separated chat ids with no personal monthly limit
+#   --free-monthly-images N  images per UTC month for every other chat (default 10)
 #   --system-daily-images N  images per UTC day for the whole bot (default 5000)
 #   --allowed-chat-ids IDS   deprecated hard allowlist; pass "" to clear it
 #   --memory MB              Lambda memory, 1024-10240 (default 2048)
@@ -37,7 +37,7 @@ ALLOWED_CHAT_IDS=""
 ALLOWED_SET="false"
 UNLIMITED_CHAT_IDS=""
 UNLIMITED_SET="false"
-FREE_DAILY=""
+FREE_MONTHLY=""
 SYSTEM_DAILY=""
 MEMORY=""
 
@@ -53,7 +53,8 @@ while [[ $# -gt 0 ]]; do
         --bot-token) BOT_TOKEN_ARG="${2:?--bot-token needs a value}"; shift 2 ;;
         --allowed-chat-ids) ALLOWED_CHAT_IDS="${2-}"; ALLOWED_SET="true"; shift 2 ;;
         --unlimited-chat-ids) UNLIMITED_CHAT_IDS="${2-}"; UNLIMITED_SET="true"; shift 2 ;;
-        --free-daily-images) FREE_DAILY="${2:?--free-daily-images needs a value}"; shift 2 ;;
+        --free-monthly-images) FREE_MONTHLY="${2:?--free-monthly-images needs a value}"; shift 2 ;;
+        --free-daily-images) fail "--free-daily-images was replaced by --free-monthly-images (the free allowance is now per month)" ;;
         --system-daily-images) SYSTEM_DAILY="${2:?--system-daily-images needs a value}"; shift 2 ;;
         --memory) MEMORY="${2:?--memory needs a value}"; shift 2 ;;
         --stack-name) STACK_NAME="${2:?--stack-name needs a value}"; shift 2 ;;
@@ -152,7 +153,7 @@ cmd_deploy() {
     if [[ -n "$bot_token" ]]; then params+=("BotToken=$bot_token"); fi
     if [[ "$ALLOWED_SET" == "true" ]]; then params+=("AllowedChatIds=$ALLOWED_CHAT_IDS"); fi
     if [[ "$UNLIMITED_SET" == "true" ]]; then params+=("UnlimitedChatIds=$UNLIMITED_CHAT_IDS"); fi
-    if [[ -n "$FREE_DAILY" ]]; then params+=("FreeDailyImages=$FREE_DAILY"); fi
+    if [[ -n "$FREE_MONTHLY" ]]; then params+=("FreeMonthlyImages=$FREE_MONTHLY"); fi
     if [[ -n "$SYSTEM_DAILY" ]]; then params+=("SystemDailyImages=$SYSTEM_DAILY"); fi
     if [[ -n "$MEMORY" ]]; then params+=("MemorySize=$MEMORY"); fi
 
@@ -244,7 +245,8 @@ cmd_status() {
     echo "Webhook URL:   $(stack_output WebhookUrl)"
     echo "State bucket:  $(stack_output StateBucketName)"
     echo "Quota table:   $(stack_output QuotaTableName)"
-    echo "Daily images:  $(function_env FREE_DAILY_IMAGES) per chat, $(function_env SYSTEM_DAILY_IMAGES) for the whole bot"
+    echo "Free images:   $(function_env FREE_MONTHLY_IMAGES) per chat per month"
+    echo "System cap:    $(function_env SYSTEM_DAILY_IMAGES) per day for the whole bot"
     echo "Unlimited:     $(function_env UNLIMITED_CHAT_IDS)"
     echo "Allowed chats: $(function_env ALLOWED_CHAT_IDS) (deprecated allowlist; empty = quotas apply to everyone)"
     echo "Telegram webhook info:"
@@ -257,8 +259,9 @@ cmd_logs() {
 
 cmd_remove() {
     stack_exists || fail "stack '$STACK_NAME' not found"
-    local bucket
+    local bucket table
     bucket=$(stack_output StateBucketName)
+    table=$(stack_output QuotaTableName)
     read -r -p "Delete stack '$STACK_NAME' and stop the bot's webhook? [y/N] " answer
     [[ "$answer" =~ ^[Yy]$ ]] || { echo "Cancelled."; exit 0; }
 
@@ -266,8 +269,8 @@ cmd_remove() {
     info "Deleting the stack"
     aws cloudformation delete-stack --stack-name "$STACK_NAME"
     aws cloudformation wait stack-delete-complete --stack-name "$STACK_NAME"
-    info "Stack deleted. The per-chat settings bucket was kept: $bucket"
-    echo "   To delete it too: aws s3 rb s3://$bucket --force"
+    info "Stack deleted. The per-chat settings bucket and the quota table were kept: $bucket, $table"
+    echo "   To delete them too: aws s3 rb s3://$bucket --force && aws dynamodb delete-table --table-name $table"
 }
 
 check_prerequisites
